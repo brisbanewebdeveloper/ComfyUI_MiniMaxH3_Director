@@ -481,6 +481,7 @@ export const IMAGE_BATCH_STYLES = `
 .bd-r2v-slot-hint{font-size:10px;color:#6a7a8a;line-height:1.35;margin:0}
 .bd-batch-src{width:88px;height:88px;border:1px dashed #555;border-radius:4px;background:#111;display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;color:#666;font-size:9px;text-align:center;padding:4px;box-sizing:border-box}
 .bd-batch-src.has-img{border-style:solid;border-color:#444}
+.bd-batch-src.from-prev{border-color:#4a789e;color:#8ab6d6}
 .bd-batch-src img{width:100%;height:100%;object-fit:contain;background:#000}
 .bd-batch-refs{display:grid;grid-template-columns:repeat(3,1fr);gap:3px;width:108px}
 .bd-batch-r2v .bd-batch-refs{grid-template-columns:repeat(3,minmax(0,1fr));width:100%;max-width:none;gap:6px}
@@ -1630,12 +1631,18 @@ function renderR2vRefSlot(el, ref, slot, index, editor) {
     }
 }
 
-function renderSourceSlot(el, imageFile) {
+function renderSourceSlot(el, imageFile, fromPrevious = false) {
     el.classList.toggle("has-img", !!imageFile);
+    el.classList.toggle("from-prev", !imageFile && fromPrevious);
     if (imageFile) {
         el.innerHTML = `<img src="${viewUrl(imageFile)}" alt="">`;
+        el.title = t("tooltip.uploadSourceImage");
+    } else if (fromPrevious) {
+        el.textContent = t("batch.sourceFromPrev");
+        el.title = t("tooltip.batchSourceFromPrev");
     } else {
         el.textContent = t("batch.uploadSource");
+        el.title = t("tooltip.uploadSourceImage");
     }
 }
 
@@ -2035,7 +2042,11 @@ export function renderImageBatchGroups(editor) {
             media.className = "bd-batch-media";
             const src = document.createElement("div");
             src.className = "bd-batch-src";
-            renderSourceSlot(src, seg.genImage?.imageFile);
+            const sourceFromPrevious = key === "i2v"
+                && masterCont
+                && index > 0
+                && isSegmentContinuityFromPrev(seg, index);
+            renderSourceSlot(src, seg.genImage?.imageFile, sourceFromPrevious);
             src.onclick = () => uploadSegSource(editor, index);
             media.appendChild(src);
             card.appendChild(media);

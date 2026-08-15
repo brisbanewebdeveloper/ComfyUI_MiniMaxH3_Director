@@ -32,10 +32,9 @@ def resolve_segment_raw_clip(plan: DirectorPlan, seg) -> torch.Tensor:
     if getattr(seg, "task_key", "") == "t2v":
         return torch.zeros((0, 16, 16, 3), dtype=torch.float32)
 
-    # fl2v end-only: plan leaves source_clip=None on purpose. Do not slice the
-    # placeholder gen source_video (len=segment_count gray frames) — that was
-    # incorrectly becoming first_frame in the single-node path.
-    if getattr(seg, "task_key", "") == "fl2v" and is_gen_timeline_plan(plan):
+    # Continuity i2v and fl2v end-only leave source_clip=None on purpose. Do not
+    # slice the prompt-batch placeholder or fall through to source-video decode.
+    if getattr(seg, "task_key", "") in {"i2v", "fl2v"} and is_gen_timeline_plan(plan):
         return torch.zeros((0, 16, 16, 3), dtype=torch.float32)
 
     sv = plan.source_video

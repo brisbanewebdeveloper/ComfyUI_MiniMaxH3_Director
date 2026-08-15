@@ -172,13 +172,15 @@ def _build_gen_source_clips(
     submode: str,
     edit_mode: str,
     global_block: dict,
+    continuity_enabled: bool,
+    continuity_flags: list[bool],
     height: int,
     width: int,
     output_mode: str,
     ref_max_size: int,
-) -> list[torch.Tensor]:
-    chunks: list[torch.Tensor] = []
-    for _start, end, seg_data in ranges:
+) -> list[torch.Tensor | None]:
+    chunks: list[torch.Tensor | None] = []
+    for seg_idx, (_start, end, seg_data) in enumerate(ranges):
         frame_count = end - _start
         if frame_count <= 0:
             continue
@@ -187,10 +189,25 @@ def _build_gen_source_clips(
         else:
             ref = _resolve_gen_image_ref(seg_data, edit_mode=edit_mode, global_block=global_block)
             if ref is None:
-                seg_idx = len(chunks) + 1
+                use_previous = (
+                    task_key == "i2v"
+                    and continuity_enabled
+                    and seg_idx > 0
+                    and seg_idx < len(continuity_flags)
+                    and continuity_flags[seg_idx]
+                )
+                if use_previous:
+                    chunks.append(None)
+                    continue
+                if seg_idx == 0:
+                    raise ValueError(
+                        "Segment #1 has no source image. "
+                        "Upload a source image for the first i2v prompt group."
+                    )
                 raise ValueError(
-                    f"Segment #{seg_idx} has no source image. "
-                    "Upload an image in the generation timeline (global or per-segment)."
+                    f"Segment #{seg_idx + 1} has no source image. "
+                    "Upload a source image for this i2v prompt group, or enable "
+                    "Segment continuity and From prev."
                 )
             img = _load_gen_image_tensor(ref)
             if task_key == "i2v":
@@ -212,33 +229,6 @@ def _build_gen_source_clips(
     if not chunks:
         raise ValueError("Generation timeline has no frames.")
     return chunks
-
-
-def _build_gen_source_video(
-    ranges: list[tuple[int, int, dict]],
-    *,
-    task_key: str,
-    submode: str,
-    edit_mode: str,
-    global_block: dict,
-    height: int,
-    width: int,
-    output_mode: str,
-    ref_max_size: int,
-) -> torch.Tensor:
-    return cat_frames_variable_size(
-        _build_gen_source_clips(
-            ranges,
-            task_key=task_key,
-            submode=submode,
-            edit_mode=edit_mode,
-            global_block=global_block,
-            height=height,
-            width=width,
-            output_mode=output_mode,
-            ref_max_size=ref_max_size,
-        )
-    )
 
 
 def build_gen_director_plan(
@@ -299,6 +289,19 @@ def build_gen_director_plan(
         task_key=task_key,
     )
 
+    from .segment_continuity import (
+        resolve_continuity_settings,
+        resolve_segment_continuity_from_prev,
+    )
+
+    continuity_enabled, continuity_overlap = resolve_continuity_settings(
+        timeline, segment_count=len(segment_ranges)
+    )
+    continuity_flags = [
+        resolve_segment_continuity_from_prev(seg_data, segment_index=idx)
+        for idx, (_start, _end, seg_data) in enumerate(segment_ranges)
+    ]
+
     if submode == "gen_blank":
         out_mode = "fixed"
         fw = int(output_block.get("width") or timeline.get("width") or width or 0)
@@ -344,6 +347,8 @@ def build_gen_director_plan(
         submode=submode,
         edit_mode=edit_mode,
         global_block=global_block,
+        continuity_enabled=continuity_enabled,
+        continuity_flags=continuity_flags,
         height=out_h,
         width=out_w,
         output_mode=out_mode,
@@ -355,8 +360,6 @@ def build_gen_director_plan(
         source_video = torch.full((len(source_clips), 16, 16, 3), 0.5, dtype=torch.float32)
     else:
         source_video = cat_frames_variable_size(source_clips)
-
-    from .segment_continuity import resolve_segment_continuity_from_prev
 
     segments: list[SegmentPlan] = []
     for idx, (start, end, seg_data) in enumerate(segment_ranges):
@@ -456,7 +459,8 @@ def build_gen_director_plan(
                 idx + 1,
                 seg_task_key,
             )
-        seg_source = source_clips[idx].clone() if idx < len(source_clips) else None
+        source_clip = source_clips[idx] if idx < len(source_clips) else None
+        seg_source = source_clip.clone() if source_clip is not None else None
 
         segments.append(
             SegmentPlan(
@@ -472,10 +476,7 @@ def build_gen_director_plan(
                 ref_videos=seg_ref_videos,
                 negative_prompt=seg_negative,
                 source_clip=seg_source,
-                continuity_from_prev=resolve_segment_continuity_from_prev(
-                    seg_data if isinstance(seg_data, dict) else {},
-                    segment_index=idx,
-                ),
+                continuity_from_prev=continuity_flags[idx],
             )
         )
 
@@ -488,12 +489,6 @@ def build_gen_director_plan(
     raw = dict(timeline)
     raw["timelineMode"] = timeline_mode
     src_w, src_h = _resolve_gen_image_source_dims(segment_ranges, global_block, output_block)
-
-    from .segment_continuity import resolve_continuity_settings
-
-    continuity_enabled, continuity_overlap = resolve_continuity_settings(
-        timeline, segment_count=len(segments)
-    )
 
     return DirectorPlan(
         frame_rate=float(timeline.get("frameRate") or frame_rate or 24),
