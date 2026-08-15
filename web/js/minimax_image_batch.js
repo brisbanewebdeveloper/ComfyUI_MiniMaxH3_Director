@@ -415,6 +415,108 @@ function stopAllPlayers(root) {
     });
 }
 
+function isAdvancedDirector(editor) {
+    const cls = editor?.node?.comfyClass || editor?.node?.type || "";
+    return cls === "MiniMaxH3DirectorAdvanced";
+}
+
+function appendSegmentLoraEditor(card, editor, seg, index, externalLocked) {
+    if (!isAdvancedDirector(editor) || externalLocked) return;
+
+    const section = document.createElement("details");
+    section.className = "bd-model-group bd-batch-loras";
+    section.onclick = (event) => event.stopPropagation();
+    const summary = document.createElement("summary");
+    summary.textContent = t("advanced.loras");
+    section.appendChild(summary);
+
+    const body = document.createElement("div");
+    body.className = "bd-batch-loras-body";
+    const actions = document.createElement("div");
+    actions.className = "bd-lora-actions";
+    const empty = document.createElement("span");
+    empty.className = "bd-lora-empty";
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "bd-btn";
+    add.textContent = t("advanced.addLora");
+    actions.append(empty, add);
+    const list = document.createElement("div");
+    list.className = "bd-lora-list";
+    body.append(actions, list);
+    section.appendChild(body);
+
+    const liveSegment = () => (
+        (editor.timeline.segments || []).find((item) => item?.id && item.id === seg.id)
+        || editor.timeline.segments?.[index]
+    );
+    const persist = (rows) => {
+        const live = liveSegment();
+        if (!live) return;
+        live.loras = rows;
+        editor.scheduleTimelineSync?.(true);
+    };
+    const render = () => {
+        const live = liveSegment();
+        const rows = Array.isArray(live?.loras) ? live.loras : [];
+        list.replaceChildren();
+        empty.textContent = rows.length ? "" : t("advanced.noLoras");
+        rows.forEach((value, rowIndex) => {
+            const row = document.createElement("div");
+            row.className = "bd-lora-row";
+            const enabled = document.createElement("input");
+            enabled.type = "checkbox";
+            enabled.checked = value?.enabled !== false;
+            const name = document.createElement("input");
+            name.type = "text";
+            name.value = value?.name || "";
+            name.placeholder = "LoRA filename";
+            if (editor.advancedLoraListId) name.setAttribute("list", editor.advancedLoraListId);
+            const strength = document.createElement("input");
+            strength.type = "number";
+            strength.min = -100;
+            strength.max = 100;
+            strength.step = 0.01;
+            strength.value = Number.isFinite(Number(value?.strength)) ? Number(value.strength) : 1;
+            const remove = document.createElement("button");
+            remove.type = "button";
+            remove.className = "bd-btn bd-btn-danger";
+            remove.textContent = "×";
+
+            const sync = () => {
+                rows[rowIndex] = {
+                    enabled: enabled.checked,
+                    name: name.value.trim(),
+                    strength: Number(strength.value),
+                };
+                persist(rows);
+            };
+            enabled.addEventListener("change", sync);
+            name.addEventListener("input", sync);
+            strength.addEventListener("input", sync);
+            remove.addEventListener("click", () => {
+                rows.splice(rowIndex, 1);
+                persist(rows);
+                render();
+                editor.updateDomWidgetHeight?.();
+            });
+            row.append(enabled, name, strength, remove);
+            list.appendChild(row);
+        });
+    };
+    add.addEventListener("click", () => {
+        const live = liveSegment();
+        const rows = Array.isArray(live?.loras) ? [...live.loras] : [];
+        rows.push({ enabled: false, name: "", strength: 1.0 });
+        persist(rows);
+        render();
+        editor.updateDomWidgetHeight?.();
+    });
+    section.addEventListener("toggle", () => editor.updateDomWidgetHeight?.());
+    render();
+    card.appendChild(section);
+}
+
 export const IMAGE_BATCH_STYLES = `
 .bd-btn.bd-disabled,.bd-btn:disabled{opacity:.38;cursor:not-allowed;pointer-events:none}
 .bd-mode button.bd-disabled,.bd-mode button:disabled{opacity:.38;cursor:not-allowed;pointer-events:none}
@@ -457,6 +559,8 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-continuity input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#6ab0ff;flex-shrink:0}
 .bd-batch-continuity span{white-space:nowrap}
 .bd-batch-head-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
+.bd-batch-loras{grid-column:1/-1}
+.bd-batch-loras-body{margin-top:6px}
 .bd-batch-fc{display:flex;align-items:center;gap:6px;color:#aaa;font-size:12px}
 .bd-batch-r2v .bd-batch-fc{color:#c8c8c8;font-size:12px;gap:8px;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:8px;padding:5px 10px}
 .bd-batch-fc input{width:72px;background:#181818;border:1px solid #444;border-radius:5px;color:#eee;padding:5px 8px;font-size:13px}
@@ -2133,6 +2237,8 @@ export function renderImageBatchGroups(editor) {
             card.appendChild(prompts);
             card.appendChild(preview);
         }
+
+        appendSegmentLoraEditor(card, editor, seg, index, externalLocked);
 
         list.appendChild(card);
     });

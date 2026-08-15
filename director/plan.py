@@ -114,6 +114,7 @@ class SegmentPlan:
     ui_index: int | None = None
     # Per-segment「引用上段」; master「段间引导」must also be on. Default True.
     continuity_from_prev: bool = True
+    loras: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def frame_count(self) -> int:

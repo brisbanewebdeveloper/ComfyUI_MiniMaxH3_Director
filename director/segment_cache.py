@@ -78,6 +78,7 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
         "continuity": plan.continuity_enabled,
         "continuity_overlap": plan.continuity_overlap_frames if plan.continuity_enabled else 0,
         "continuity_from_prev": bool(getattr(seg, "continuity_from_prev", True)),
+        "loras": list(getattr(seg, "loras", None) or []),
         # Bump CONTINUITY_PIPELINE_ID when sampling/handoff semantics change.
         "continuity_pipeline": CONTINUITY_PIPELINE_ID,
     }

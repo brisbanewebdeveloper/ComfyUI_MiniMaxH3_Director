@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 import torch
 
@@ -252,6 +252,7 @@ def execute_director_plan_core(
     shift_video: float = 12.0,
     shift_audio: float = 3.0,
     clear_vram_between_segments: bool = True,
+    segment_model_provider: Callable[[Any, Any], Any] | None = None,
 ) -> tuple[
     torch.Tensor,
     list[torch.Tensor],
@@ -753,6 +754,12 @@ def execute_director_plan_core(
         if clear_vram_between_segments:
             cleanup_segment_vram(enabled=True, unload_models=seg_total > 1)
 
+        segment_model = (
+            segment_model_provider(model, seg)
+            if segment_model_provider is not None
+            else model
+        )
+
         def _report_sample_phase(phase: str, value: float) -> None:
             report_director_progress(
                 node_id, segment_index=progress_index, segment_total=seg_total,
@@ -781,7 +788,7 @@ def execute_director_plan_core(
                 log.debug("Live TAE preview skipped: %s", exc)
 
         samples = sample_single_stage(
-            model=model,
+            model=segment_model,
             positive=positive,
             negative=negative,
             latent=latent,
@@ -878,7 +885,7 @@ def execute_director_plan_core(
             plan,
             seg,
             samples=samples,
-            model=model,
+            model=segment_model,
             vae=vae,
             audio_vae=audio_vae,
             positive=positive,

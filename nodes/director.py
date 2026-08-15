@@ -199,6 +199,7 @@ class MiniMaxH3Director:
         export_source_images=False,
         **kwargs,
     ):
+        segment_model_provider = kwargs.pop("_segment_model_provider", None)
         del kwargs
 
         plan = prepare_director_plan(
@@ -232,6 +233,7 @@ class MiniMaxH3Director:
                 shift_video=shift_video,
                 shift_audio=shift_audio,
                 clear_vram_between_segments=clear_vram_between_segments,
+                segment_model_provider=segment_model_provider,
             )
         )
 

@@ -104,6 +104,17 @@ class GenTimelineContinuityTest(unittest.TestCase):
         self.assertIsNotNone(plan.segments[1].source_clip)
         self.assertTrue(plan.segments[1].continuity_from_prev)
 
+    def test_prompt_group_loras_are_preserved_on_the_segment_plan(self):
+        timeline = i2v_timeline(continuity_enabled=True)
+        timeline["segments"][1]["loras"] = [
+            {"enabled": True, "name": "detail.safetensors", "strength": 0.8}
+        ]
+
+        plan = build_plan(timeline)
+
+        self.assertEqual(plan.segments[0].loras, [])
+        self.assertEqual(plan.segments[1].loras, timeline["segments"][1]["loras"])
+
 
 if __name__ == "__main__":
     unittest.main()

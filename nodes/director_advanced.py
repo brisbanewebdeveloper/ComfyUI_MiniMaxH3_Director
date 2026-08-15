@@ -44,11 +44,14 @@ def _registered_node(node_id: str) -> type:
     return node_class
 
 
-def _parse_loras(raw: str) -> list[dict[str, Any]]:
-    try:
-        data = json.loads(raw or "[]")
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid MiniMax H3 Director LoRA configuration: {exc.msg}.") from exc
+def _parse_loras(raw: str | list[Any]) -> list[dict[str, Any]]:
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw or "[]")
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid MiniMax H3 Director LoRA configuration: {exc.msg}.") from exc
+    else:
+        data = raw
     if not isinstance(data, list):
         raise ValueError("MiniMax H3 Director LoRA configuration must be a list.")
 
@@ -70,6 +73,16 @@ def _parse_loras(raw: str) -> list[dict[str, Any]]:
         if strength != 0.0:
             loras.append({"name": name, "strength": strength})
     return loras
+
+
+def _load_loras(model: Any, raw: str | list[Any]) -> Any:
+    for lora in _parse_loras(raw):
+        model = nodes.LoraLoaderModelOnly().load_lora_model_only(
+            model,
+            lora["name"],
+            lora["strength"],
+        )[0]
+    return model
 
 
 class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
@@ -157,57 +170,63 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
         easycache_verbose: bool = False,
         **kwargs: Any,
     ) -> Any:
-        for lora in _parse_loras(lora_config):
-            model = nodes.LoraLoaderModelOnly().load_lora_model_only(
-                model,
-                lora["name"],
-                lora["strength"],
-            )[0]
+        shared_lora_model = _load_loras(model, lora_config)
 
-        if enable_sage_attention:
-            patcher = _registered_node("PathchSageAttentionKJ")()
-            model = _first_output(patcher.patch(model, sage_attention, allow_sage_compile))
+        def apply_model_patches(candidate: Any) -> Any:
+            if enable_sage_attention:
+                patcher = _registered_node("PathchSageAttentionKJ")()
+                candidate = _first_output(patcher.patch(candidate, sage_attention, allow_sage_compile))
 
-        if enable_h3_mem_eff_sage:
-            patcher = _registered_node("MiniMaxH3MemoryEfficientSageAttentionPatch")
-            model = _first_output(patcher.execute(model))
+            if enable_h3_mem_eff_sage:
+                patcher = _registered_node("MiniMaxH3MemoryEfficientSageAttentionPatch")
+                candidate = _first_output(patcher.execute(candidate))
 
-        if enable_sol_attn:
-            patcher = _registered_node("SolAttnPatch")
-            model = _first_output(
-                patcher.execute(
-                    model,
-                    float(sol_tau),
-                    float(sol_start_percent),
-                    float(sol_end_percent),
-                    int(sol_min_tokens),
-                    bool(sol_int8_qk),
-                    sol_sink_conditioning,
-                    bool(sol_morton),
-                    sol_morton_curve,
-                    sol_dense_blocks,
-                    bool(sol_verbose),
-                    tau_profile=sol_tau_profile or None,
-                    use_tma=bool(sol_use_tma),
-                    int8_pv=bool(sol_int8_pv),
+            if enable_sol_attn:
+                patcher = _registered_node("SolAttnPatch")
+                candidate = _first_output(
+                    patcher.execute(
+                        candidate,
+                        float(sol_tau),
+                        float(sol_start_percent),
+                        float(sol_end_percent),
+                        int(sol_min_tokens),
+                        bool(sol_int8_qk),
+                        sol_sink_conditioning,
+                        bool(sol_morton),
+                        sol_morton_curve,
+                        sol_dense_blocks,
+                        bool(sol_verbose),
+                        tau_profile=sol_tau_profile or None,
+                        use_tma=bool(sol_use_tma),
+                        int8_pv=bool(sol_int8_pv),
+                    )
                 )
-            )
 
-        if enable_easycache:
-            model = _first_output(
-                EasyCacheNode.execute(
-                    model,
-                    float(easycache_reuse_threshold),
-                    float(easycache_start_percent),
-                    float(easycache_end_percent),
-                    bool(easycache_verbose),
+            if enable_easycache:
+                candidate = _first_output(
+                    EasyCacheNode.execute(
+                        candidate,
+                        float(easycache_reuse_threshold),
+                        float(easycache_start_percent),
+                        float(easycache_end_percent),
+                        bool(easycache_verbose),
+                    )
                 )
-            )
+            return candidate
+
+        shared_model = apply_model_patches(shared_lora_model)
+
+        def segment_model_provider(_model: Any, segment: Any) -> Any:
+            local_loras = _parse_loras(getattr(segment, "loras", []) or [])
+            if not local_loras:
+                return shared_model
+            return apply_model_patches(_load_loras(shared_lora_model, local_loras))
 
         return super().execute(
-            model=model,
+            model=shared_model,
             video_vae=video_vae,
             audio_vae=audio_vae,
             clip=clip,
+            _segment_model_provider=segment_model_provider,
             **kwargs,
         )

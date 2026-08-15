@@ -1407,6 +1407,7 @@ function parseTimeline(raw, totalFrames, fps) {
             seg.referenceVideo = seg.referenceVideo || seg.reference_video || {};
             seg.genImage = seg.genImage || { imageFile: seg.imageFile || "" };
             seg.negativePrompt = seg.negativePrompt ?? "";
+            seg.loras = Array.isArray(seg.loras) ? seg.loras : [];
         }
         data.gen = data.gen || { defaultFrameCount: 124 };
         if (data.global) {
@@ -1472,10 +1473,16 @@ function parseTimeline(raw, totalFrames, fps) {
     }
 }
 
+function notifyWidgetChanged(node, widget, oldValue) {
+    widget.callback?.(widget.value);
+    node?.onWidgetChanged?.(widget.name, widget.value, oldValue, widget);
+    node?.setDirtyCanvas?.(true, false);
+}
+
 function updateAdvancedWidget(editor, widget, value) {
+    const oldValue = widget.value;
     widget.value = value;
-    widget.callback?.(value);
-    editor.node?.setDirtyCanvas?.(true, false);
+    if (oldValue !== value) notifyWidgetChanged(editor.node, widget, oldValue);
 }
 
 function makeAdvancedWidgetField(editor, name, label) {
@@ -2207,6 +2214,7 @@ class MiniMaxH3DirectorEditor {
                         refAudios: clean.refAudios || [],
                         refVideos: clean.refVideos || [],
                         genImage: clean.genImage || { imageFile: "" },
+                        loras: Array.isArray(clean.loras) ? clean.loras : [],
                         // Persist per-segment「引用上段」(default true when unset).
                         continuityFromPrev: isSegmentContinuityFromPrev(clean, i),
                     };
@@ -2304,17 +2312,24 @@ class MiniMaxH3DirectorEditor {
         };
     }
 
-    flushTimelineSync() {
+    flushTimelineSync(notifyGraph = false) {
         clearTimeout(this._syncTimer);
         this._syncTimer = null;
+        const shouldNotify = notifyGraph || !!this._syncNotifyGraph;
+        this._syncNotifyGraph = false;
         // Refresh visibility first so queue flush can pull checkbox state reliably.
         this.updateSegmentContinuityUI();
-        this._writeTimelineWidget();
+        this._writeTimelineWidget(shouldNotify);
     }
 
-    scheduleTimelineSync() {
+    scheduleTimelineSync(notifyGraph = false) {
         clearTimeout(this._syncTimer);
-        this._syncTimer = setTimeout(() => this._writeTimelineWidget(), TIMELINE_SYNC_DEBOUNCE_MS);
+        this._syncNotifyGraph = !!this._syncNotifyGraph || notifyGraph;
+        this._syncTimer = setTimeout(() => {
+            const shouldNotify = !!this._syncNotifyGraph;
+            this._syncNotifyGraph = false;
+            this._writeTimelineWidget(shouldNotify);
+        }, TIMELINE_SYNC_DEBOUNCE_MS);
     }
 
     _flushPromptTokenEditors() {
@@ -2323,7 +2338,7 @@ class MiniMaxH3DirectorEditor {
         refreshPromptTokenEditors(this.root || document);
     }
 
-    _writeTimelineWidget() {
+    _writeTimelineWidget(notifyGraph = false) {
         if (!this.timelineWidget) return;
         // Token editors keep textarea.value in sync on blur/input; force-flush
         // before serialize so a focused editor cannot drop the latest draft.
@@ -2333,8 +2348,14 @@ class MiniMaxH3DirectorEditor {
         if (this.isImageBatch?.()) flushBatchPromptInputs(this);
         if (this.isFl2vMode?.()) flushFl2vPromptDraft(this);
         this.syncFromWidgets();
-        this.timelineWidget.value = JSON.stringify(this.buildTimelinePayload());
-        this.node.setDirtyCanvas(true, false);
+        const oldValue = this.timelineWidget.value;
+        const nextValue = JSON.stringify(this.buildTimelinePayload());
+        this.timelineWidget.value = nextValue;
+        if (notifyGraph && oldValue !== nextValue) {
+            notifyWidgetChanged(this.node, this.timelineWidget, oldValue);
+        } else {
+            this.node.setDirtyCanvas(true, false);
+        }
     }
 
     _markNodeDirtyLight() {

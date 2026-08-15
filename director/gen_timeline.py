@@ -477,6 +477,7 @@ def build_gen_director_plan(
                 negative_prompt=seg_negative,
                 source_clip=seg_source,
                 continuity_from_prev=continuity_flags[idx],
+                loras=list(seg_data.get("loras") or []),
             )
         )
 

@@ -26,6 +26,13 @@ def load_advanced_module():
             return {"required": {}, "optional": {"shift_video": ("FLOAT", {}), "shift_audio": ("FLOAT", {})}}
 
         def execute(self, **kwargs):
+            provider = kwargs.get("_segment_model_provider")
+            segment_loras = kwargs.pop("test_segment_loras", None)
+            if provider is not None and segment_loras is not None:
+                kwargs["segment_models"] = [
+                    provider(kwargs["model"], types.SimpleNamespace(loras=loras))
+                    for loras in segment_loras
+                ]
             calls.append(("director", kwargs["model"]))
             return kwargs
 
@@ -167,6 +174,37 @@ class AdvancedDirectorTest(unittest.TestCase):
         )
         self.assertEqual(self.calls[0], ("lora", "one.safetensors", 0.75))
         self.assertEqual(self.calls[1], ("lora", "two.safetensors", -0.5))
+
+    def test_prompt_group_loras_are_isolated_and_follow_shared_loras(self):
+        result = self.module.MiniMaxH3DirectorAdvanced().execute(
+            model="base",
+            video_vae="video",
+            audio_vae="audio",
+            clip="clip",
+            lora_config='[{"name":"shared.safetensors","strength":0.5}]',
+            test_segment_loras=[
+                [{"name": "first.safetensors", "strength": 0.75}],
+                [{"name": "second.safetensors", "strength": -0.25}],
+                [],
+            ],
+        )
+
+        self.assertEqual(
+            result["segment_models"],
+            [
+                "base>lora:shared.safetensors:0.5>lora:first.safetensors:0.75",
+                "base>lora:shared.safetensors:0.5>lora:second.safetensors:-0.25",
+                "base>lora:shared.safetensors:0.5",
+            ],
+        )
+        self.assertEqual(
+            [call for call in self.calls if call[0] == "lora"],
+            [
+                ("lora", "shared.safetensors", 0.5),
+                ("lora", "first.safetensors", 0.75),
+                ("lora", "second.safetensors", -0.25),
+            ],
+        )
 
     def test_enabled_missing_custom_node_has_actionable_error(self):
         with self.assertRaisesRegex(RuntimeError, "PathchSageAttentionKJ is enabled"):
