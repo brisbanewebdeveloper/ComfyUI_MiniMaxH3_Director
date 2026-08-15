@@ -36,6 +36,7 @@ from .prompt_enhance_templates import (
     resolve_enhance_template,
     patch_rv2v_vision_intro,
 )
+from .security import validate_llm_url
 from .task_prompts import resolve_task_key
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.prompt_enhancer")
@@ -232,15 +233,8 @@ def _format_zhipu_http_error(status: int, body: str, *, model: str) -> str:
 
 
 def resolve_api_key(api_format: str, widget_key: str = "") -> str:
-    key = (widget_key or "").strip()
-    if key:
-        return key
-    if api_format == API_FORMAT_ZHIPU:
-        return (
-            os.environ.get("ZHIPU_API_KEY", "").strip()
-            or os.environ.get("MINIMAX_PE_API_KEY", "").strip()
-        )
-    return ""
+    del api_format
+    return (widget_key or "").strip()
 
 
 def llm_headers(
@@ -272,6 +266,7 @@ def unload_llama_swap_model_sync(
         return "No model selected"
     endpoint = llama_swap_unload_endpoint(url, model)
     try:
+        validate_llm_url(endpoint)
         req = urllib.request.Request(
             endpoint,
             data=b"",
@@ -287,7 +282,7 @@ def unload_llama_swap_model_sync(
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         return f"llama-swap HTTP {exc.code}: {body[:200] or exc.reason}"
-    except (urllib.error.URLError, TimeoutError, ConnectionResetError, OSError) as exc:
+    except (urllib.error.URLError, TimeoutError, ConnectionResetError, OSError, ValueError) as exc:
         return f"{type(exc).__name__}: {exc} ({endpoint})"
 
 
@@ -591,9 +586,13 @@ def enhance_prompt_sync(
     api_format = infer_api_format(base_url, api_format)
     openai_compat_mode = normalize_openai_compat_mode(openai_compat_mode)
     endpoint = llm_chat_endpoint(base_url, api_format)
+    try:
+        validate_llm_url(endpoint)
+    except ValueError as exc:
+        return None, str(exc)
 
     if api_format == API_FORMAT_ZHIPU and not resolve_api_key(api_format, api_key):
-        return None, "智谱 API Key 未配置（请在面板填写或设置环境变量）"
+        return None, "智谱 API Key 未配置（请在面板填写）"
 
     src_count = vision_source_count if vision_source_count is not None else 0
     slots = list(ref_slots or [])
@@ -965,6 +964,10 @@ async def list_llm_models(
 
     base = coerce_llm_url(url, default=default_url_for_format(api_format))
     api_format = infer_api_format(base, api_format)
+    try:
+        validate_llm_url(base)
+    except ValueError as exc:
+        return [], str(exc)
     try:
         async with aiohttp.ClientSession() as session:
             endpoint = llm_models_endpoint(base, api_format)

@@ -21,6 +21,7 @@ from ..lib.ref_audios import MAX_REFERENCE_AUDIOS, ref_audios_dict
 from ..lib.ref_images import MAX_REFERENCE_IMAGES, REF_IMAGE_KEY_PREFIX
 from ..lib.ref_videos import MAX_REFERENCE_VIDEOS, ref_videos_dict
 from ..lib.image_prep import assert_minimax_canvas, resolve_output_dimensions
+from ..lib.security import resolve_input_file
 from ..lib.task_prompts import get_task_prompt_spec, resolve_task_key
 from ..lib.video_io import (
     load_reference_video_clip,
@@ -202,8 +203,11 @@ def _decode_image_b64(b64_str: str) -> torch.Tensor:
 def load_reference_tensor(ref: dict) -> torch.Tensor | None:
     if ref.get("imageFile"):
         rel = str(ref["imageFile"]).replace("\\", "/")
-        file_path = os.path.join(folder_paths.get_input_directory(), rel.replace("/", os.sep))
-        if os.path.exists(file_path):
+        try:
+            file_path = resolve_input_file(rel)
+        except FileNotFoundError:
+            file_path = None
+        if file_path is not None:
             img = Image.open(file_path).convert("RGB")
             arr = np.array(img, dtype=np.float32) / 255.0
             return torch.from_numpy(arr).unsqueeze(0)
@@ -257,9 +261,10 @@ def load_reference_audio_item(item: dict) -> dict | None:
     sub = str(item.get("subfolder") or "").replace("\\", "/").strip().strip("/")
     if sub and not rel.startswith(sub + "/"):
         rel = f"{sub}/{rel}"
-    file_path = os.path.join(folder_paths.get_input_directory(), rel.replace("/", os.sep))
-    if not os.path.isfile(file_path):
-        log.warning("Reference audio missing: %s", file_path)
+    try:
+        file_path = resolve_input_file(rel)
+    except FileNotFoundError:
+        log.warning("Reference audio missing from ComfyUI input: %s", rel)
         return None
     audio = load_reference_audio(file_path)
     if audio is None:

@@ -13,6 +13,7 @@ import torch
 import folder_paths
 
 from .image_prep import resolve_output_dimensions
+from .security import resolve_input_file
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.video_io")
 
@@ -35,18 +36,25 @@ def resolve_video_path(video: dict) -> str:
     if not video_file:
         raise ValueError("No video file in MiniMax H3 Director timeline.")
 
-    base = folder_paths.get_input_directory()
     subfolder = (video.get("subfolder") or "").strip().replace("\\", "/")
 
-    candidates = []
+    candidates: list[tuple[str, str]] = []
     if subfolder and not video_file.startswith(subfolder):
-        candidates.append(os.path.join(base, subfolder, os.path.basename(video_file)))
-    candidates.append(os.path.join(base, video_file.replace("/", os.sep)))
-    candidates.append(os.path.join(base, os.path.basename(video_file)))
+        candidates.append((os.path.basename(video_file), subfolder))
+    candidates.append((video_file, ""))
+    candidates.append((os.path.basename(video_file), ""))
 
-    for path in candidates:
-        if os.path.isfile(path):
-            return path
+    invalid_path = False
+    for name, candidate_subfolder in candidates:
+        try:
+            return str(resolve_input_file(name, subfolder=candidate_subfolder))
+        except ValueError:
+            invalid_path = True
+        except FileNotFoundError:
+            continue
+
+    if invalid_path:
+        raise ValueError(f"Invalid video file path: {video_file!r}")
 
     raise ValueError(f"Video file not found in ComfyUI input: {video_file}")
 

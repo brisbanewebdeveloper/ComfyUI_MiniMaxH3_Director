@@ -19,13 +19,19 @@ import folder_paths
 
 from .h3_motion_context import CONTINUITY_PIPELINE_ID
 from .plan import DirectorPlan, SegmentPlan
+from ..lib.security import safe_cache_key
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.cache")
+_NESTED_SAMPLES_MARKER = "__minimax_nested_samples__"
 
 
 def _cache_root(node_id: str) -> Path | None:
+    cache_key = safe_cache_key(node_id)
+    if cache_key is None:
+        log.warning("Unsafe Director node id; segment cache disabled for this run.")
+        return None
     try:
-        root = Path(folder_paths.get_output_directory()) / "minimax_seg_cache" / str(node_id)
+        root = Path(folder_paths.get_output_directory()) / "minimax_seg_cache" / cache_key
         root.mkdir(parents=True, exist_ok=True)
         return root
     except OSError as exc:
@@ -252,14 +258,10 @@ def load_segment_handoff_meta(
 
 def _av_latent_to_cpu(av_latent: dict) -> dict:
     samples = av_latent["samples"]
+    nested_samples = False
     if hasattr(samples, "unbind"):
-        parts = [p.detach().cpu().contiguous() for p in samples.unbind()]
-        try:
-            import comfy.nested_tensor
-
-            samples_cpu = comfy.nested_tensor.NestedTensor(tuple(parts))
-        except Exception:
-            samples_cpu = tuple(parts)
+        samples_cpu = tuple(p.detach().cpu().contiguous() for p in samples.unbind())
+        nested_samples = True
     elif isinstance(samples, (tuple, list)):
         samples_cpu = tuple(p.detach().cpu().contiguous() for p in samples)
     elif torch.is_tensor(samples):
@@ -267,8 +269,10 @@ def _av_latent_to_cpu(av_latent: dict) -> dict:
     else:
         samples_cpu = samples
     out = {"samples": samples_cpu}
+    if nested_samples:
+        out[_NESTED_SAMPLES_MARKER] = True
     for key, value in av_latent.items():
-        if key == "samples":
+        if key in {"samples", _NESTED_SAMPLES_MARKER}:
             continue
         if torch.is_tensor(value):
             out[key] = value.detach().cpu().contiguous()
@@ -300,9 +304,13 @@ def load_segment_av_latent(
         expected = segment_cache_fingerprint(seg, plan)
         if stored != expected and not allow_stale:
             return None
-        payload = torch.load(latent_path, map_location="cpu", weights_only=False)
+        payload = torch.load(latent_path, map_location="cpu", weights_only=True)
         if not isinstance(payload, dict) or "samples" not in payload:
             return None
+        if payload.pop(_NESTED_SAMPLES_MARKER, False):
+            import comfy.nested_tensor
+
+            payload["samples"] = comfy.nested_tensor.NestedTensor(tuple(payload["samples"]))
         return payload
     except Exception as exc:
         log.warning("Failed to load segment %d AV latent cache: %s", idx + 1, exc)
@@ -412,7 +420,7 @@ def load_segment_audio(
     if not audio_path.is_file():
         return None
     try:
-        payload = torch.load(audio_path, map_location="cpu", weights_only=False)
+        payload = torch.load(audio_path, map_location="cpu", weights_only=True)
         if not isinstance(payload, dict):
             return None
         wave = payload.get("waveform")

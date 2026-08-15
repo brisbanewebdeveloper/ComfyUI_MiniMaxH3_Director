@@ -747,7 +747,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         const cfg = pe.getLlmConfig();
         if (!cfg.model) { pe.setStatus("请输入模型名称", "error"); return; }
         if ((cfg.apiFormat === API_ZHIPU) && !cfg.apiKey) {
-            pe.setStatus("请填写 API Key（或设置环境变量）", "error");
+            pe.setStatus("请填写 API Key", "error");
             return;
         }
 

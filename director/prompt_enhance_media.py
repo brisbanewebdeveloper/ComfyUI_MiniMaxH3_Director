@@ -21,6 +21,7 @@ from ..lib.prompt_enhance_templates import (
     normalize_character_feature_enhance,
     normalize_output_language,
 )
+from ..lib.security import resolve_input_file
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director")
 
@@ -582,12 +583,11 @@ def extract_input_video_frames_b64(
     """Extract uniformly sampled JPEG base64 frames from a file in ComfyUI input/."""
     if not filename:
         return [], "No filename"
-    input_dir = folder_paths.get_input_directory()
-    safe = os.path.normpath(str(filename)).replace("\\", "/")
-    if safe.startswith("..") or os.path.isabs(safe):
+    try:
+        video_path = resolve_input_file(filename, subfolder=subfolder)
+    except ValueError:
         return [], "Invalid filename"
-    video_path = os.path.join(input_dir, subfolder, safe) if subfolder else os.path.join(input_dir, safe)
-    if not os.path.isfile(video_path):
+    except FileNotFoundError:
         return [], f"File not found: {filename}"
 
     num_frames = max(1, min(int(num_frames), 5))
@@ -604,7 +604,7 @@ def extract_input_video_frames_b64(
                 "stream=nb_read_frames,nb_frames",
                 "-of",
                 "csv=p=0",
-                video_path,
+                str(video_path),
             ],
             capture_output=True,
             text=True,
@@ -625,7 +625,7 @@ def extract_input_video_frames_b64(
                     "ffmpeg",
                     "-y",
                     "-i",
-                    video_path,
+                    str(video_path),
                     "-vf",
                     f"select=eq(n\\,{idx})",
                     "-frames:v",
@@ -653,12 +653,11 @@ def extract_input_video_frames_b64(
 def load_input_image_b64(filename: str) -> tuple[str | None, str | None]:
     if not filename:
         return None, "No filename"
-    input_dir = folder_paths.get_input_directory()
-    safe = os.path.normpath(str(filename)).replace("\\", "/")
-    if safe.startswith("..") or os.path.isabs(safe):
+    try:
+        path = resolve_input_file(filename)
+    except ValueError:
         return None, "Invalid filename"
-    path = os.path.join(input_dir, safe)
-    if not os.path.isfile(path):
+    except FileNotFoundError:
         return None, f"File not found: {filename}"
     try:
         img = Image.open(path).convert("RGB")

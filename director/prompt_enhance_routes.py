@@ -32,6 +32,7 @@ from ..lib.prompt_enhancer import (
     normalize_openai_compat_mode,
 )
 from ..lib.task_prompts import resolve_task_key
+from ..lib.security import validate_llm_url
 from .prompt_enhance_media import extract_input_video_frames_b64, load_input_image_b64
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director")
@@ -214,6 +215,7 @@ async def director_unload_model(request):
         return web.json_response({"error": "Current API format does not support model unload"}, status=400)
 
     try:
+        validate_llm_url(endpoint)
         async with aiohttp.ClientSession() as session:
             kwargs = {
                 "timeout": aiohttp.ClientTimeout(total=10),
@@ -228,6 +230,8 @@ async def director_unload_model(request):
                     return web.json_response({"error": f"{success_label} HTTP {resp.status}: {text[:200]}"}, status=502)
                 await resp.read()
         return web.json_response({"status": "unloaded", "model": model, "provider": success_label})
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
     except Exception as exc:
         return web.json_response({"error": f"{type(exc).__name__}: {exc}"}, status=502)
 
