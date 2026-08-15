@@ -542,8 +542,8 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-r2v .bd-batch-prompts .bd-label{color:#eaeaea;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
 .bd-batch-prompts textarea,.bd-batch-prompts .bd-token-wrap{width:100%;min-height:88px;box-sizing:border-box}
 .bd-batch-prompts textarea{background:#181818;border:1px solid #333;border-radius:4px;color:#eee;padding:6px;resize:vertical;font-size:11px;font-family:inherit;line-height:1.35}
-.bd-batch-plain .bd-batch-prompts textarea,.bd-batch-source .bd-batch-prompts textarea,
-.bd-batch-plain .bd-batch-prompts .bd-token-wrap,.bd-batch-source .bd-batch-prompts .bd-token-wrap{min-height:120px;height:100%;resize:vertical;overflow:auto}
+.bd-batch-plain .bd-batch-prompts textarea,.bd-batch-source .bd-batch-prompts textarea,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-prompts textarea,
+.bd-batch-plain .bd-batch-prompts .bd-token-wrap,.bd-batch-source .bd-batch-prompts .bd-token-wrap,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-prompts .bd-token-wrap{min-height:240px;height:100%;resize:vertical;overflow:auto}
 .bd-batch-r2v .bd-batch-prompts textarea,.bd-batch-r2v .bd-batch-prompts .bd-token-wrap{min-height:360px;height:100%;flex:1;resize:vertical;overflow:auto}
 .bd-batch-r2v .bd-batch-prompts textarea{background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45}
 .bd-batch-preview{background:#0d0d0d;border:1px solid #333;border-radius:4px;min-height:100px;display:flex;flex-direction:column;align-items:stretch;justify-content:center;overflow:hidden;color:#555;font-size:10px;text-align:center;padding:4px;box-sizing:border-box}
