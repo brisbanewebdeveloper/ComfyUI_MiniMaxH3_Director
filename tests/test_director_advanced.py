@@ -1,0 +1,186 @@
+import importlib.util
+import sys
+import types
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+
+class FakeNodeOutput:
+    def __init__(self, value):
+        self.args = (value,)
+
+
+def load_advanced_module():
+    calls = []
+    package_name = "director_advanced_test_package"
+
+    package = types.ModuleType(package_name)
+    package.__path__ = []
+    nodes_package = types.ModuleType(f"{package_name}.nodes")
+    nodes_package.__path__ = []
+
+    class BaseDirector:
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {"required": {}, "optional": {"shift_video": ("FLOAT", {}), "shift_audio": ("FLOAT", {})}}
+
+        def execute(self, **kwargs):
+            calls.append(("director", kwargs["model"], kwargs["_apply_sigma_shift"]))
+            return kwargs
+
+    director_module = types.ModuleType(f"{package_name}.nodes.director")
+    director_module.MiniMaxH3Director = BaseDirector
+
+    core_nodes = types.ModuleType("nodes")
+
+    class LoraLoaderModelOnly:
+        def load_lora_model_only(self, model, name, strength):
+            calls.append(("lora", name, strength))
+            return (f"{model}>lora:{name}:{strength}",)
+
+    core_nodes.LoraLoaderModelOnly = LoraLoaderModelOnly
+    core_nodes.NODE_CLASS_MAPPINGS = {}
+
+    comfy_extras = types.ModuleType("comfy_extras")
+    comfy_extras.__path__ = []
+    easycache_module = types.ModuleType("comfy_extras.nodes_easycache")
+    minimax_module = types.ModuleType("comfy_extras.nodes_minimax_h3")
+
+    class EasyCacheNode:
+        @classmethod
+        def execute(cls, model, threshold, start, end, verbose):
+            calls.append(("easycache", threshold, start, end, verbose))
+            return FakeNodeOutput(f"{model}>easycache")
+
+    class MiniMaxH3SigmaShift:
+        @classmethod
+        def execute(cls, model, video, audio):
+            calls.append(("sampling", video, audio))
+            return FakeNodeOutput(f"{model}>sampling")
+
+    easycache_module.EasyCacheNode = EasyCacheNode
+    minimax_module.MiniMaxH3SigmaShift = MiniMaxH3SigmaShift
+
+    module_name = f"{package_name}.nodes.director_advanced"
+    modules = {
+        package_name: package,
+        f"{package_name}.nodes": nodes_package,
+        f"{package_name}.nodes.director": director_module,
+        module_name: None,
+        "nodes": core_nodes,
+        "comfy_extras": comfy_extras,
+        "comfy_extras.nodes_easycache": easycache_module,
+        "comfy_extras.nodes_minimax_h3": minimax_module,
+    }
+    modules.pop(module_name)
+    module_patch = patch.dict(sys.modules, modules)
+    module_patch.start()
+
+    module_path = Path(__file__).parents[1] / "nodes" / "director_advanced.py"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+
+    def cleanup():
+        sys.modules.pop(module_name, None)
+        module_patch.stop()
+
+    return module, core_nodes, calls, cleanup
+
+
+class AdvancedDirectorTest(unittest.TestCase):
+    def setUp(self):
+        self.module, self.core_nodes, self.calls, cleanup = load_advanced_module()
+        self.addCleanup(cleanup)
+
+    def test_lora_configuration_rejects_invalid_values(self):
+        with self.assertRaisesRegex(ValueError, "must be a list"):
+            self.module._parse_loras("{}")
+        with self.assertRaisesRegex(ValueError, "needs a filename"):
+            self.module._parse_loras('[{"enabled": true, "strength": 1}]')
+        with self.assertRaisesRegex(ValueError, "between -100 and 100"):
+            self.module._parse_loras('[{"name": "bad.safetensors", "strength": 101}]')
+
+    def test_disabled_enhancements_pass_the_original_model_to_director(self):
+        result = self.module.MiniMaxH3DirectorAdvanced().execute(
+            model="base",
+            video_vae="video",
+            audio_vae="audio",
+            clip="clip",
+            enable_model_sampling=False,
+            shift_video=12,
+            shift_audio=3,
+        )
+
+        self.assertEqual(result["model"], "base")
+        self.assertFalse(result["_apply_sigma_shift"])
+        self.assertEqual(self.calls, [("director", "base", False)])
+
+    def test_enabled_enhancements_apply_in_model_preparation_order(self):
+        calls = self.calls
+
+        class SagePatch:
+            def patch(self, model, mode, allow_compile):
+                calls.append(("sage", mode, allow_compile))
+                return (f"{model}>sage",)
+
+        class MemoryPatch:
+            @classmethod
+            def execute(cls, model):
+                calls.append(("memory",))
+                return FakeNodeOutput(f"{model}>memory")
+
+        class SolPatch:
+            @classmethod
+            def execute(cls, model, *args, **kwargs):
+                calls.append(("sol", args, kwargs))
+                return FakeNodeOutput(f"{model}>sol")
+
+        self.core_nodes.NODE_CLASS_MAPPINGS.update(
+            {
+                "PathchSageAttentionKJ": SagePatch,
+                "MiniMaxH3MemoryEfficientSageAttentionPatch": MemoryPatch,
+                "SolAttnPatch": SolPatch,
+            }
+        )
+
+        result = self.module.MiniMaxH3DirectorAdvanced().execute(
+            model="base",
+            video_vae="video",
+            audio_vae="audio",
+            clip="clip",
+            lora_config='[{"name":"one.safetensors","strength":0.75},{"name":"two.safetensors","strength":-0.5}]',
+            enable_sage_attention=True,
+            sage_attention="auto",
+            allow_sage_compile=True,
+            enable_h3_mem_eff_sage=True,
+            enable_sol_attn=True,
+            enable_easycache=True,
+            shift_video=10,
+            shift_audio=2,
+        )
+
+        self.assertTrue(result["model"].endswith(">sampling>sage>memory>sol>easycache"))
+        self.assertEqual(
+            [call[0] for call in self.calls],
+            ["lora", "lora", "sampling", "sage", "memory", "sol", "easycache", "director"],
+        )
+        self.assertEqual(self.calls[0], ("lora", "one.safetensors", 0.75))
+        self.assertEqual(self.calls[1], ("lora", "two.safetensors", -0.5))
+
+    def test_enabled_missing_custom_node_has_actionable_error(self):
+        with self.assertRaisesRegex(RuntimeError, "PathchSageAttentionKJ is enabled"):
+            self.module.MiniMaxH3DirectorAdvanced().execute(
+                model="base",
+                video_vae="video",
+                audio_vae="audio",
+                clip="clip",
+                enable_model_sampling=False,
+                enable_sage_attention=True,
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -246,6 +246,7 @@ def execute_director_plan_core(
     shift_video: float = 12.0,
     shift_audio: float = 3.0,
     clear_vram_between_segments: bool = True,
+    apply_sigma_shift: bool = True,
 ) -> tuple[
     torch.Tensor,
     list[torch.Tensor],
@@ -755,6 +756,7 @@ def execute_director_plan_core(
             scheduler=scheduler,
             shift_video=shift_video,
             shift_audio=shift_audio,
+            apply_sigma_shift=apply_sigma_shift,
             on_phase=_report_sample_phase,
             on_step_preview=_report_step_preview if live_tae_preview else None,
             preview_every=1,
@@ -807,6 +809,7 @@ def execute_director_plan_core(
             scheduler=scheduler,
             shift_video=shift_video,
             shift_audio=shift_audio,
+            apply_sigma_shift=apply_sigma_shift,
             on_phase=_report_sample_phase,
             on_step_preview=_report_step_preview if live_tae_preview else None,
             first_pass_images=upscale_frames,

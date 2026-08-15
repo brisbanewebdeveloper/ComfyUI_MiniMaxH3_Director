@@ -34,6 +34,7 @@ def sample_single_stage(
     scheduler: str,
     shift_video: float = 12.0,
     shift_audio: float = 3.0,
+    apply_sigma_shift: bool = True,
     on_phase: PhaseCallback | None = None,
     on_step_preview: StepPreviewCallback | None = None,
     preview_every: int = 1,
@@ -50,8 +51,11 @@ def sample_single_stage(
             on_phase(phase, value)
 
     notify(phase_name, 0)
-    shifted = MiniMaxH3SigmaShift.execute(model, float(shift_video), float(shift_audio))
-    model_shifted = _unpack_node_output(shifted)[0]
+    if apply_sigma_shift:
+        shifted = MiniMaxH3SigmaShift.execute(model, float(shift_video), float(shift_audio))
+        model_shifted = _unpack_node_output(shifted)[0]
+    else:
+        model_shifted = model
 
     neg = negative if negative else []
     steps = int(steps)

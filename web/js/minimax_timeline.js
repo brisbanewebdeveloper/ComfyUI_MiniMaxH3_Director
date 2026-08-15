@@ -321,6 +321,47 @@ const HIDDEN_WIDGETS = [
     // seed stays visible under 采样设置 (with control_after_generate)
 ];
 
+const ADVANCED_HIDDEN_WIDGETS = [
+    "lora_config", "enable_model_sampling", "shift_video", "shift_audio",
+    "enable_sage_attention", "sage_attention", "allow_sage_compile",
+    "enable_h3_mem_eff_sage", "enable_sol_attn", "sol_tau",
+    "sol_start_percent", "sol_end_percent", "sol_min_tokens", "sol_int8_qk",
+    "sol_sink_conditioning", "sol_morton", "sol_morton_curve", "sol_int8_pv",
+    "sol_verbose", "sol_use_tma", "sol_tau_profile", "sol_dense_blocks",
+    "enable_easycache", "easycache_reuse_threshold", "easycache_start_percent",
+    "easycache_end_percent", "easycache_verbose",
+];
+
+const ADVANCED_MODEL_GROUPS = [
+    ["ModelSamplingMiniMaxH3", [
+        ["enable_model_sampling", "enabled"], ["shift_video", "shift_video"],
+        ["shift_audio", "shift_audio"],
+    ]],
+    ["Patch Sage Attention KJ", [
+        ["enable_sage_attention", "enabled"], ["sage_attention", "sage_attention"],
+        ["allow_sage_compile", "allow_compile"],
+    ]],
+    ["MiniMax H3 Mem Eff Sage Attention Patch", [
+        ["enable_h3_mem_eff_sage", "enabled"],
+    ]],
+    ["Patch Sol-Attn", [
+        ["enable_sol_attn", "enabled"], ["sol_tau", "tau"],
+        ["sol_start_percent", "start_percent"], ["sol_end_percent", "end_percent"],
+        ["sol_min_tokens", "min_tokens"], ["sol_int8_qk", "int8_qk"],
+        ["sol_sink_conditioning", "sink_conditioning"], ["sol_morton", "morton"],
+        ["sol_morton_curve", "morton_curve"], ["sol_int8_pv", "int8_pv"],
+        ["sol_verbose", "verbose"], ["sol_use_tma", "use_tma"],
+        ["sol_tau_profile", "tau_profile"], ["sol_dense_blocks", "dense_blocks"],
+    ]],
+    ["EasyCache", [
+        ["enable_easycache", "enabled"],
+        ["easycache_reuse_threshold", "reuse_threshold"],
+        ["easycache_start_percent", "start_percent"],
+        ["easycache_end_percent", "end_percent"],
+        ["easycache_verbose", "verbose"],
+    ]],
+];
+
 const DIRECTOR_WIDGET_LABEL_KEYS = {
     seed: "widget.seed",
     clear_vram_between_segments: "widget.clearVram",
@@ -725,6 +766,19 @@ const STYLES = `
 .bd-continuous-ref label{display:flex;align-items:center;gap:4px;cursor:pointer}
 .bd-continuous-ref input[type="checkbox"]{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
 .bd-gen-fc-row{display:flex;align-items:center;gap:6px;margin-top:6px}
+.bd-model-enhancements{border:1px solid #424858;border-radius:6px;background:#20242d;padding:7px;max-height:260px;overflow:auto}
+.bd-model-enhancements>summary{cursor:pointer;font-weight:700;color:#aebeff;user-select:none}
+.bd-model-enhancements-body{display:grid;grid-template-columns:minmax(260px,1fr) 2fr;gap:8px;margin-top:8px}
+.bd-model-group{border:1px solid #383e4c;border-radius:5px;padding:6px;background:#191c23}
+.bd-model-group>summary{cursor:pointer;font-weight:600;color:#d8dce8}
+.bd-model-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:5px;margin-top:6px}
+.bd-model-field{display:flex;align-items:center;gap:6px;min-width:0}
+.bd-model-field>span{min-width:72px;color:#aeb4c2;overflow:hidden;text-overflow:ellipsis}
+.bd-model-field input:not([type=checkbox]),.bd-model-field select,.bd-model-field textarea{min-width:0;width:100%;box-sizing:border-box;background:#11141a;color:#e0e0e0;border:1px solid #454c5c;border-radius:3px;padding:3px 5px}
+.bd-lora-list{display:flex;flex-direction:column;gap:5px;margin-top:6px}
+.bd-lora-row{display:grid;grid-template-columns:auto minmax(130px,1fr) 74px auto;gap:5px;align-items:center}
+.bd-lora-empty{color:#8f96a5;font-style:italic}
+.bd-lora-actions{display:flex;justify-content:space-between;align-items:center;gap:8px}
 ${IMAGE_BATCH_STYLES}
 ${FL2V_STYLES}
 @media(max-width:768px){
@@ -932,20 +986,21 @@ function buildClipFrameMap(clipIndex, count) {
 const CLIP_SEGMENT_COLORS = ["rgba(255,200,50,0.9)", "rgba(102,170,255,0.9)", "rgba(79,255,143,0.9)", "rgba(255,102,170,0.9)"];
 
 function getDirectorUiHeight(editor) {
+    const advancedHeight = isAdvancedDirectorNode(editor?.node) ? 36 : 0;
     if (editor?.getDirectorMode?.() === "prompt_batch") {
         const batchH = getImageBatchUiHeight(editor);
         // r2v shows the main timeline track (like fl2v) above batch cards.
         if (editor?.isR2vBatch?.()) {
             const track = editor?.canvasHeight || RULER_H + SEG_LABEL_H + TRACK_H;
             // toolbar + track + batch panel (batchH already includes list max-height cap)
-            return batchH + track + 100;
+            return batchH + track + 100 + advancedHeight;
         }
-        return batchH + 100;
+        return batchH + 100 + advancedHeight;
     }
     if (editor?.getDirectorMode?.() === "fl2v") {
         let h = getFl2vUiHeight(editor) + 160;
         if (editor?.needsLiveSamplePanel?.()) h += LIVE_SAMPLE_PREVIEW_H + 12;
-        return h;
+        return h + advancedHeight;
     }
     let h = (editor?.canvasHeight || RULER_H + SEG_LABEL_H + TRACK_H) + 370 + 52;
     if (
@@ -960,7 +1015,7 @@ function getDirectorUiHeight(editor) {
     if (editor?.needsLiveSamplePanel?.() && !editor?.usesV2vPromptStyle?.()) {
         h += LIVE_SAMPLE_PREVIEW_H + 12;
     }
-    return h;
+    return h + advancedHeight;
 }
 
 function hookTaskTypeWidget(node) {
@@ -1417,6 +1472,213 @@ function parseTimeline(raw, totalFrames, fps) {
     }
 }
 
+function updateAdvancedWidget(editor, widget, value) {
+    widget.value = value;
+    widget.callback?.(value);
+    editor.node?.setDirtyCanvas?.(true, false);
+}
+
+function makeAdvancedWidgetField(editor, name, label) {
+    const widget = editor.widget(name);
+    if (!widget) return null;
+    const row = document.createElement("label");
+    row.className = "bd-model-field";
+    const caption = document.createElement("span");
+    caption.textContent = label;
+    caption.title = label;
+    row.appendChild(caption);
+
+    let control;
+    if (typeof widget.value === "boolean") {
+        control = document.createElement("input");
+        control.type = "checkbox";
+        control.checked = widget.value;
+        control.addEventListener("change", () => updateAdvancedWidget(editor, widget, control.checked));
+    } else if (Array.isArray(widget.options?.values)) {
+        control = document.createElement("select");
+        for (const value of widget.options.values) {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = value;
+            control.appendChild(option);
+        }
+        control.value = widget.value;
+        control.addEventListener("change", () => updateAdvancedWidget(editor, widget, control.value));
+    } else if (typeof widget.value === "number") {
+        control = document.createElement("input");
+        control.type = "number";
+        for (const key of ["min", "max", "step"]) {
+            if (widget.options?.[key] != null) control[key] = widget.options[key];
+        }
+        control.value = widget.value;
+        control.addEventListener("change", () => {
+            const value = Number(control.value);
+            if (Number.isFinite(value)) updateAdvancedWidget(editor, widget, value);
+        });
+    } else {
+        control = name === "sol_tau_profile"
+            ? document.createElement("textarea")
+            : document.createElement("input");
+        if (control.tagName === "INPUT") control.type = "text";
+        control.value = widget.value ?? "";
+        control.addEventListener("change", () => updateAdvancedWidget(editor, widget, control.value));
+    }
+    row.appendChild(control);
+    return row;
+}
+
+function parseAdvancedLoras(widget) {
+    try {
+        const rows = JSON.parse(widget?.value || "[]");
+        return Array.isArray(rows) ? rows.filter((row) => row && typeof row === "object") : [];
+    } catch {
+        return [];
+    }
+}
+
+function renderAdvancedLoras(editor) {
+    const list = editor.advancedLoraList;
+    const widget = editor.widget("lora_config");
+    if (!list || !widget) return;
+    const rows = parseAdvancedLoras(widget);
+    list.replaceChildren();
+    if (!rows.length) {
+        const empty = document.createElement("div");
+        empty.className = "bd-lora-empty";
+        empty.dataset.i18n = "advanced.noLoras";
+        empty.textContent = t("advanced.noLoras");
+        list.appendChild(empty);
+        return;
+    }
+
+    const sync = () => {
+        const values = [...list.querySelectorAll(".bd-lora-row")].map((row) => ({
+            enabled: row.querySelector('[data-f="enabled"]').checked,
+            name: row.querySelector('[data-f="name"]').value.trim(),
+            strength: Number(row.querySelector('[data-f="strength"]').value),
+        }));
+        updateAdvancedWidget(editor, widget, JSON.stringify(values));
+    };
+
+    rows.forEach((value, index) => {
+        const row = document.createElement("div");
+        row.className = "bd-lora-row";
+        const enabled = document.createElement("input");
+        enabled.type = "checkbox";
+        enabled.dataset.f = "enabled";
+        enabled.checked = value.enabled !== false;
+        const name = document.createElement("input");
+        name.type = "text";
+        name.dataset.f = "name";
+        name.setAttribute("list", editor.advancedLoraListId);
+        name.value = value.name || "";
+        name.placeholder = "LoRA filename";
+        const strength = document.createElement("input");
+        strength.type = "number";
+        strength.dataset.f = "strength";
+        strength.min = -100;
+        strength.max = 100;
+        strength.step = 0.01;
+        strength.value = Number.isFinite(Number(value.strength)) ? Number(value.strength) : 1;
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "bd-btn bd-btn-danger";
+        remove.textContent = "×";
+        remove.addEventListener("click", () => {
+            rows.splice(index, 1);
+            updateAdvancedWidget(editor, widget, JSON.stringify(rows));
+            renderAdvancedLoras(editor);
+        });
+        enabled.addEventListener("change", sync);
+        for (const control of [name, strength]) control.addEventListener("input", sync);
+        row.append(enabled, name, strength, remove);
+        list.appendChild(row);
+    });
+}
+
+async function loadAdvancedLoraNames(editor) {
+    try {
+        const response = await api.fetchApi("/object_info/LoraLoaderModelOnly");
+        if (!response.ok) return;
+        const data = await response.json();
+        const definition = data?.LoraLoaderModelOnly || data;
+        const names = definition?.input?.required?.lora_name?.[0];
+        if (!Array.isArray(names)) return;
+        editor.advancedLoraDataList.replaceChildren();
+        for (const name of names) {
+            const option = document.createElement("option");
+            option.value = name;
+            editor.advancedLoraDataList.appendChild(option);
+        }
+    } catch {
+        // The filename remains editable when object_info is unavailable.
+    }
+}
+
+function mountAdvancedModelPanel(editor) {
+    if (!isAdvancedDirectorNode(editor.node)) return null;
+    const panel = document.createElement("details");
+    panel.className = "bd-model-enhancements";
+    const summary = document.createElement("summary");
+    summary.dataset.i18n = "advanced.title";
+    summary.textContent = t("advanced.title");
+    panel.appendChild(summary);
+
+    const body = document.createElement("div");
+    body.className = "bd-model-enhancements-body";
+    const loraGroup = document.createElement("div");
+    loraGroup.className = "bd-model-group";
+    const loraActions = document.createElement("div");
+    loraActions.className = "bd-lora-actions";
+    const loraTitle = document.createElement("b");
+    loraTitle.dataset.i18n = "advanced.loras";
+    loraTitle.textContent = t("advanced.loras");
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "bd-btn";
+    add.dataset.i18n = "advanced.addLora";
+    add.textContent = t("advanced.addLora");
+    loraActions.append(loraTitle, add);
+    loraGroup.appendChild(loraActions);
+    editor.advancedLoraList = document.createElement("div");
+    editor.advancedLoraList.className = "bd-lora-list";
+    editor.advancedLoraListId = `bd-lora-names-${uid()}`;
+    editor.advancedLoraDataList = document.createElement("datalist");
+    editor.advancedLoraDataList.id = editor.advancedLoraListId;
+    loraGroup.append(editor.advancedLoraList, editor.advancedLoraDataList);
+    add.addEventListener("click", () => {
+        const widget = editor.widget("lora_config");
+        const rows = parseAdvancedLoras(widget);
+        rows.push({ enabled: false, name: "", strength: 1.0 });
+        updateAdvancedWidget(editor, widget, JSON.stringify(rows));
+        renderAdvancedLoras(editor);
+    });
+    body.appendChild(loraGroup);
+
+    const patches = document.createElement("div");
+    patches.className = "bd-model-fields";
+    for (const [title, fields] of ADVANCED_MODEL_GROUPS) {
+        const group = document.createElement("details");
+        group.className = "bd-model-group";
+        const groupTitle = document.createElement("summary");
+        groupTitle.textContent = title;
+        group.appendChild(groupTitle);
+        const controls = document.createElement("div");
+        controls.className = "bd-model-fields";
+        for (const [name, label] of fields) {
+            const field = makeAdvancedWidgetField(editor, name, label);
+            if (field) controls.appendChild(field);
+        }
+        group.appendChild(controls);
+        patches.appendChild(group);
+    }
+    body.appendChild(patches);
+    panel.appendChild(body);
+    renderAdvancedLoras(editor);
+    loadAdvancedLoraNames(editor);
+    return panel;
+}
+
 class MiniMaxH3DirectorEditor {
     constructor(node, container, domWidget) {
         this.node = node;
@@ -1462,8 +1724,11 @@ class MiniMaxH3DirectorEditor {
         this._stageSyncMs = 0;
         this._playHandoff = false;
 
+        const hiddenWidgets = isAdvancedDirectorNode(node)
+            ? [...HIDDEN_WIDGETS, ...ADVANCED_HIDDEN_WIDGETS]
+            : HIDDEN_WIDGETS;
         for (const w of node.widgets || []) {
-            if (HIDDEN_WIDGETS.includes(w.name)) hideWidget(w);
+            if (hiddenWidgets.includes(w.name)) hideWidget(w);
         }
 
         this.timelineWidget = this.widget("timeline_data");
@@ -2365,6 +2630,9 @@ class MiniMaxH3DirectorEditor {
                 </div>
             </div>`;
         this.mainBody.appendChild(bottom);
+
+        const advancedModelPanel = mountAdvancedModelPanel(this);
+        if (advancedModelPanel) this.mainBody.appendChild(advancedModelPanel);
 
         const batchUi = mountImageBatchPanel(this.mainBody);
         this.batchPanel = batchUi.panel;
@@ -9735,12 +10003,21 @@ function clearAllDirectorRunStatus() {
 /** Old workflows may still list removed output slots (e.g. segment_images). */
 function isMiniMaxH3DirectorNode(node) {
     const cls = node?.comfyClass || node?.type || "";
-    return cls === "MiniMaxH3Director" || cls === "ComfyMiniMaxH3Director";
+    return cls === "MiniMaxH3Director"
+        || cls === "MiniMaxH3DirectorAdvanced"
+        || cls === "ComfyMiniMaxH3Director";
+}
+
+function isAdvancedDirectorNode(node) {
+    const cls = node?.comfyClass || node?.type || "";
+    return cls === "MiniMaxH3DirectorAdvanced";
 }
 
 function isDirectorNodeDef(nodeType, nodeData) {
     const cls = nodeType?.comfyClass || nodeData?.name || "";
-    return cls === "MiniMaxH3Director" || cls === "ComfyMiniMaxH3Director";
+    return cls === "MiniMaxH3Director"
+        || cls === "MiniMaxH3DirectorAdvanced"
+        || cls === "ComfyMiniMaxH3Director";
 }
 
 function stripDeprecatedDirectorOutputs(node) {

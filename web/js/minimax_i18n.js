@@ -21,6 +21,11 @@ const ZH = {
     "toolbar.langToggleTitle": "Switch UI to English",
     "toolbar.noVideo": "未上传视频",
 
+    "advanced.title": "模型增强（LoRA / 注意力 / 缓存）",
+    "advanced.loras": "LoRA（仅模型）",
+    "advanced.addLora": "+ 添加 LoRA",
+    "advanced.noLoras": "未添加 LoRA",
+
     "tooltip.addRefGroup": "添加一组参考素材（图片 / 音频 / 视频）",
     "tooltip.addShot": "添加一组首尾帧（首帧/尾帧均可选，支持只传尾帧）",
     "tooltip.appendVideo": "上传并追加到时间轴末尾，作为独立片段",
@@ -406,6 +411,11 @@ const EN = {
     "toolbar.langToggle": "中文",
     "toolbar.langToggleTitle": "切换为中文界面",
     "toolbar.noVideo": "No video uploaded",
+
+    "advanced.title": "Model enhancements (LoRA / attention / cache)",
+    "advanced.loras": "LoRAs (model only)",
+    "advanced.addLora": "+ Add LoRA",
+    "advanced.noLoras": "No LoRAs added",
 
     "tooltip.addRefGroup": "Add a reference group (images / audio / video)",
     "tooltip.addShot": "Add a first/last-frame shot (start and/or end; end-only OK)",
