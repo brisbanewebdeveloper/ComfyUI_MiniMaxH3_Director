@@ -9,6 +9,7 @@ import nodes
 from comfy_extras.nodes_easycache import EasyCacheNode
 
 from .director import MiniMaxH3Director
+from .first_block_cache import apply_first_block_cache
 
 
 SAGE_ATTENTION_MODES = [
@@ -133,6 +134,24 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
                 "easycache_start_percent": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "easycache_end_percent": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "easycache_verbose": ("BOOLEAN", {"default": False}),
+                "enable_firstblock_cache": (
+                    "BOOLEAN",
+                    {"default": False, "tooltip": "Reuse MiniMax H3 tail-block residuals across similar denoising steps."},
+                ),
+                "firstblock_cache_threshold": (
+                    "FLOAT",
+                    {
+                        "default": 0.08,
+                        "min": 0.001,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "tooltip": "Maximum first-block relative L1 change allowed for reuse. 0.08 is the conservative Sol-Engine starting value.",
+                    },
+                ),
+                "firstblock_cache_verbose": (
+                    "BOOLEAN",
+                    {"default": False, "tooltip": "Log each cache decision in addition to the final reuse summary."},
+                ),
             }
         )
         inputs["optional"] = optional
@@ -168,8 +187,14 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
         easycache_start_percent: float = 0.15,
         easycache_end_percent: float = 0.95,
         easycache_verbose: bool = False,
+        enable_firstblock_cache: bool = False,
+        firstblock_cache_threshold: float = 0.08,
+        firstblock_cache_verbose: bool = False,
         **kwargs: Any,
     ) -> Any:
+        if enable_firstblock_cache and enable_easycache:
+            raise ValueError("FirstBlockCache and EasyCache cannot both be enabled; choose one cache")
+
         shared_lora_model = _load_loras(model, lora_config)
 
         def apply_model_patches(candidate: Any) -> Any:
@@ -200,6 +225,13 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
                         use_tma=bool(sol_use_tma),
                         int8_pv=bool(sol_int8_pv),
                     )
+                )
+
+            if enable_firstblock_cache:
+                candidate = apply_first_block_cache(
+                    candidate,
+                    float(firstblock_cache_threshold),
+                    bool(firstblock_cache_verbose),
                 )
 
             if enable_easycache:

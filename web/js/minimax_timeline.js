@@ -328,6 +328,7 @@ const ADVANCED_HIDDEN_WIDGETS = [
     "sol_start_percent", "sol_end_percent", "sol_min_tokens", "sol_int8_qk",
     "sol_sink_conditioning", "sol_morton", "sol_morton_curve", "sol_int8_pv",
     "sol_verbose", "sol_use_tma", "sol_tau_profile", "sol_dense_blocks",
+    "enable_firstblock_cache", "firstblock_cache_threshold", "firstblock_cache_verbose",
     "enable_easycache", "easycache_reuse_threshold", "easycache_start_percent",
     "easycache_end_percent", "easycache_verbose",
 ];
@@ -348,6 +349,11 @@ const ADVANCED_MODEL_GROUPS = [
         ["sol_morton_curve", "morton_curve"], ["sol_int8_pv", "int8_pv"],
         ["sol_verbose", "verbose"], ["sol_use_tma", "use_tma"],
         ["sol_tau_profile", "tau_profile"], ["sol_dense_blocks", "dense_blocks"],
+    ]],
+    ["FirstBlockCache (MiniMax H3)", [
+        ["enable_firstblock_cache", "enabled"],
+        ["firstblock_cache_threshold", "threshold"],
+        ["firstblock_cache_verbose", "verbose"],
     ]],
     ["EasyCache", [
         ["enable_easycache", "enabled"],

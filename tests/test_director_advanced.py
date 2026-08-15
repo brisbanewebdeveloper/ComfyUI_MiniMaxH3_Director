@@ -61,11 +61,20 @@ def load_advanced_module():
 
     easycache_module.EasyCacheNode = EasyCacheNode
 
+    firstblock_module = types.ModuleType(f"{package_name}.nodes.first_block_cache")
+
+    def apply_first_block_cache(model, threshold, verbose):
+        calls.append(("firstblock", threshold, verbose))
+        return f"{model}>firstblock"
+
+    firstblock_module.apply_first_block_cache = apply_first_block_cache
+
     module_name = f"{package_name}.nodes.director_advanced"
     modules = {
         package_name: package,
         f"{package_name}.nodes": nodes_package,
         f"{package_name}.nodes.director": director_module,
+        f"{package_name}.nodes.first_block_cache": firstblock_module,
         module_name: None,
         "nodes": core_nodes,
         "comfy_extras": comfy_extras,
@@ -107,6 +116,11 @@ class AdvancedDirectorTest(unittest.TestCase):
         self.assertIn("shift_video", optional)
         self.assertIn("shift_audio", optional)
         self.assertNotIn("enable_model_sampling", optional)
+        self.assertEqual(optional["enable_firstblock_cache"][1]["default"], False)
+        self.assertEqual(optional["firstblock_cache_threshold"][1]["default"], 0.08)
+        self.assertEqual(optional["firstblock_cache_verbose"][1]["default"], False)
+        names = list(optional)
+        self.assertGreater(names.index("enable_firstblock_cache"), names.index("easycache_verbose"))
 
     def test_disabled_enhancements_pass_the_original_model_to_director(self):
         result = self.module.MiniMaxH3DirectorAdvanced().execute(
@@ -174,6 +188,48 @@ class AdvancedDirectorTest(unittest.TestCase):
         )
         self.assertEqual(self.calls[0], ("lora", "one.safetensors", 0.75))
         self.assertEqual(self.calls[1], ("lora", "two.safetensors", -0.5))
+
+    def test_firstblock_cache_applies_after_attention_patch(self):
+        calls = self.calls
+
+        class SolPatch:
+            @classmethod
+            def execute(cls, model, *args, **kwargs):
+                calls.append(("sol", args, kwargs))
+                return FakeNodeOutput(f"{model}>sol")
+
+        self.core_nodes.NODE_CLASS_MAPPINGS["SolAttnPatch"] = SolPatch
+
+        result = self.module.MiniMaxH3DirectorAdvanced().execute(
+            model="base",
+            video_vae="video",
+            audio_vae="audio",
+            clip="clip",
+            enable_sol_attn=True,
+            enable_firstblock_cache=True,
+            firstblock_cache_threshold=0.08,
+            firstblock_cache_verbose=True,
+        )
+
+        self.assertEqual(result["model"], "base>sol>firstblock")
+        self.assertEqual(
+            [call[0] for call in self.calls],
+            ["sol", "firstblock", "director"],
+        )
+        self.assertEqual(self.calls[1], ("firstblock", 0.08, True))
+
+    def test_firstblock_cache_rejects_easycache_combination(self):
+        with self.assertRaisesRegex(ValueError, "cannot both be enabled"):
+            self.module.MiniMaxH3DirectorAdvanced().execute(
+                model="base",
+                video_vae="video",
+                audio_vae="audio",
+                clip="clip",
+                enable_firstblock_cache=True,
+                enable_easycache=True,
+            )
+
+        self.assertEqual(self.calls, [])
 
     def test_prompt_group_loras_are_isolated_and_follow_shared_loras(self):
         result = self.module.MiniMaxH3DirectorAdvanced().execute(
