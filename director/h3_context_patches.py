@@ -5,8 +5,8 @@ coexistence so the Director can pin a previous segment's tail into the next
 segment. Behavior is inspired by community Motion Context work; this module is
 an original Apache-2.0 implementation for AIMixer/ComfyUI_MiniMaxH3_Director.
 
-Does not copy third-party GPL sources. Refuses to stack on foreign H3 layout /
-payload wrappers (including standalone Motion Context packs).
+Does not copy third-party GPL sources. Refuses to stack on incompatible foreign
+H3 layout / payload wrappers (including standalone Motion Context packs).
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ CTX_FRAME_KEY = "director_context_index"
 CTX_AUDIO_END_KEY = "director_context_audio_end"
 LAYOUT_MARKER = "_h3_director_continuity_layout_patch"
 PAYLOAD_MARKER = "_h3_director_continuity_payload_patch"
+_SOLATTN_LAYOUT_MODULE_SUFFIX = "._morton_h3"
 
 # Known foreign markers — stand down / refuse rather than double-wrap.
 _FOREIGN_LAYOUT_MARKERS = (
@@ -312,7 +313,7 @@ def _self_test_layout() -> None:
 
 
 def _classify_layout_owner() -> str | None:
-    """Return None, 'ours', 'foreign_mc', or 'foreign_other'."""
+    """Classify the active MiniMax H3 layout constructor owner."""
     mm = _mm()
     init = getattr(getattr(mm, "PackedLayout", None), "__init__", None)
     if init is None:
@@ -328,6 +329,8 @@ def _classify_layout_owner() -> str | None:
     home = getattr(mm.PackedLayout, "__module__", None)
     where = getattr(init, "__module__", None)
     if home and where and where != home:
+        if where.endswith(_SOLATTN_LAYOUT_MODULE_SUFFIX):
+            return "compatible_solattn"
         return "foreign_other"
     return None
 
