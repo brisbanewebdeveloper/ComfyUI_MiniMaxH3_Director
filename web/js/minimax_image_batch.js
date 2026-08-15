@@ -30,7 +30,7 @@ import {
     roundDurationSec,
     sumFrameCounts,
 } from "./minimax_gen_timeline.js";
-import { refreshPromptTokenEditors, wirePromptImageMentions } from "./minimax_prompt_mentions.js";
+import { refreshPromptTokenEditors, safePreviewImageUrl, wirePromptImageMentions } from "./minimax_prompt_mentions.js";
 import { t } from "./minimax_i18n.js";
 
 const _players = new WeakMap();
@@ -1229,7 +1229,7 @@ function renderAudioSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
 function renderVideoSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
     const label = refVideoLabel(slot);
     const file = ref?.videoFile || "";
-    const posterSrc = ref?.previewImageUrl
+    const posterSrc = safePreviewImageUrl(ref?.previewImageUrl)
         || (ref?.previewImageFile ? viewUrl(ref.previewImageFile) : "");
     const hasMedia = !!(file || posterSrc || ref?.linked);
     const titleFile = file || ref?.fileName || ref?.previewImageFile || "";

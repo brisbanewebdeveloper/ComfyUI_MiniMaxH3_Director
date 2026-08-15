@@ -91,7 +91,7 @@ import {
     updateFl2vDetailUI,
     updateFl2vToolbarBtns,
 } from "./minimax_fl2v.js";
-import { mountPromptImageMentions, refreshPromptTokenEditors } from "./minimax_prompt_mentions.js";
+import { mountPromptImageMentions, refreshPromptTokenEditors, safePreviewImageUrl } from "./minimax_prompt_mentions.js";
 import {
     applyI18nDom,
     aspectDisplayLabel,
@@ -231,7 +231,7 @@ function sanitizeRefVideo(ref) {
         durationSec: ref.durationSec,
         pairedAudioFile: ref.pairedAudioFile || "",
         previewImageFile: ref.previewImageFile || "",
-        previewImageUrl: ref.previewImageUrl || "",
+        previewImageUrl: safePreviewImageUrl(ref.previewImageUrl),
         linked: !!ref.linked || !!(ref.videoFile || ref.previewImageFile || ref.previewImageUrl),
     };
 }
@@ -1677,7 +1677,7 @@ class MiniMaxH3DirectorEditor {
                         subfolder: r.subfolder || "",
                         pairedAudioFile: r.pairedAudioFile || "",
                         previewImageFile: r.previewImageFile || "",
-                        previewImageUrl: r.previewImageUrl || "",
+                        previewImageUrl: safePreviewImageUrl(r.previewImageUrl),
                         linked: !!r.linked || !!(r.videoFile || r.previewImageFile || r.previewImageUrl),
                     }))
                     : (matched?.refVideos || []);
@@ -7307,7 +7307,7 @@ class MiniMaxH3DirectorEditor {
             const vidPath = vidRef?.videoFile || "";
             const vidType = vidRef?.type || "input";
             const posterFile = vidRef?.previewImageFile || "";
-            const posterUrl = vidRef?.previewImageUrl || "";
+            const posterUrl = safePreviewImageUrl(vidRef?.previewImageUrl);
             let cacheKey = "";
             let srcKind = "";
             if (imgFile) {
@@ -8498,7 +8498,7 @@ class MiniMaxH3DirectorEditor {
             const label = refVideoLabel(i);
             const ref = (target.refVideos || []).find((r) => Number(r.index ?? r.slot) === i);
             const file = ref?.videoFile || "";
-            const posterSrc = ref?.previewImageUrl
+            const posterSrc = safePreviewImageUrl(ref?.previewImageUrl)
                 || (ref?.previewImageFile ? refViewUrl(ref.previewImageFile) : "");
             const hasMedia = !!(file || posterSrc || ref?.linked);
             const titleFile = file || ref?.fileName || ref?.previewImageFile || "";
@@ -9421,7 +9421,7 @@ function resolveLinkedVideoPoster(graph, node, inputName, depth = 0) {
     const imgEl = (src.imageIndex != null ? src.imgs?.[src.imageIndex] : null) || src.imgs?.[0];
     if (imgEl?.src) {
         return {
-            previewImageUrl: imgEl.src,
+            previewImageUrl: safePreviewImageUrl(imgEl.src),
             previewImageFile: parseViewUrlToPath(imgEl.src) || "",
         };
     }
@@ -9450,10 +9450,10 @@ function collectAutogrowVideoRefs(graph, node) {
             const ref = videoRefFromPath(path, idx);
             if (poster) {
                 ref.previewImageFile = poster.previewImageFile || "";
-                ref.previewImageUrl = poster.previewImageUrl || "";
+                ref.previewImageUrl = safePreviewImageUrl(poster.previewImageUrl);
             }
             found.set(idx, ref);
-        } else if (poster?.previewImageUrl || poster?.previewImageFile) {
+        } else if (safePreviewImageUrl(poster?.previewImageUrl) || poster?.previewImageFile) {
             found.set(idx, {
                 index: idx,
                 videoFile: "",
@@ -9464,7 +9464,7 @@ function collectAutogrowVideoRefs(graph, node) {
                 subfolder: "",
                 pairedAudioFile: "",
                 previewImageFile: poster.previewImageFile || "",
-                previewImageUrl: poster.previewImageUrl || "",
+                previewImageUrl: safePreviewImageUrl(poster.previewImageUrl),
                 linked: true,
             });
         } else {

@@ -18,6 +18,26 @@ import { t } from "./minimax_i18n.js";
 const TAG_RE = /<(Picture|Video|Audio)\s+(\d+)\s*>/gi;
 const TOKEN_CLASS = "bd-token";
 
+/** Allow only local or non-fetching image sources for workflow previews. */
+export function safePreviewImageUrl(value) {
+    const raw = String(value || "").trim();
+    const origin = globalThis.location?.origin;
+    if (!raw || !origin) return "";
+    if (/^data:image\/(?:png|jpe?g|gif|webp|avif|bmp)(?:[;,])/i.test(raw)) return raw;
+    try {
+        const parsed = new URL(raw, globalThis.location.href);
+        if (parsed.protocol === "blob:") {
+            return parsed.origin === origin ? raw : "";
+        }
+        if ((parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.origin === origin) {
+            return raw;
+        }
+    } catch (_) {
+        // Ignore malformed preview URLs.
+    }
+    return "";
+}
+
 const MENTION_STYLES = `
 .bd-mention-menu{position:fixed;z-index:10050;min-width:210px;max-width:300px;max-height:240px;overflow:auto;background:#252525;border:1px solid #444;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);padding:4px 0}
 .bd-mention-menu.hidden{display:none!important}
@@ -112,7 +132,7 @@ function refThumbUrl(ref) {
 }
 
 function videoThumbUrl(ref) {
-    if (ref?.previewImageUrl) return String(ref.previewImageUrl);
+    if (ref?.previewImageUrl) return safePreviewImageUrl(ref.previewImageUrl);
     if (ref?.previewImageFile) return inputViewUrl(ref.previewImageFile, "input");
     return "";
 }
@@ -121,7 +141,7 @@ function videoThumbUrl(ref) {
 function makeMentionMenuThumb(item) {
     if (item?.thumb) {
         const img = document.createElement("img");
-        img.src = item.thumb;
+        img.src = safePreviewImageUrl(item.thumb);
         img.alt = item.label || "";
         return img;
     }
