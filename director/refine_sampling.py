@@ -9,12 +9,35 @@ import torch
 
 from ..lib.image_prep import ensure_minimax_canvas
 from .core_sampling import sample_single_stage
-from .refine_pack import refine_seed_for, refine_steps_for
+from .refine_pack import refine_model_for, refine_passes_for, refine_seed_for, refine_steps_for
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.refine")
 
 PhaseCallback = Callable[[str, float], None]
 StepPreviewCallback = Callable[[int, int, Any], None]
+RefinePassCallback = Callable[[int, int, dict], None]
+
+
+def _make_upscale_pbar(total: int):
+    try:
+        import comfy.utils
+
+        if getattr(comfy.utils, "PROGRESS_BAR_ENABLED", True):
+            return comfy.utils.ProgressBar(max(1, int(total)))
+    except Exception:
+        pass
+    return None
+
+
+def _report_upscale_frames(done: int, total: int, *, on_phase=None, pbar=None) -> None:
+    total = max(1, int(total))
+    done = max(0, min(int(done), total))
+    if pbar is not None:
+        pbar.update_absolute(done)
+    if on_phase is not None and (done == 0 or done == total or done % 4 == 0):
+        on_phase("upscale", done / total)
+    if done == 0 or done == total or done % 8 == 0:
+        log.info("upscale %d/%d (%.0f%%)", done, total, 100.0 * done / total)
 
 
 def _unpack(out):
@@ -99,7 +122,14 @@ def _scale_images(images: torch.Tensor, width: int, height: int) -> torch.Tensor
     ).movedim(1, -1)
 
 
-def _upscale_with_rtx_vsr(images: torch.Tensor, width: int, height: int) -> torch.Tensor:
+def _upscale_with_rtx_vsr(
+    images: torch.Tensor,
+    width: int,
+    height: int,
+    *,
+    on_phase=None,
+    pbar=None,
+) -> torch.Tensor:
     """NVIDIA RTX Video Super Resolution to an explicit canvas (same idea as KJNodes)."""
     try:
         import nvvfx
@@ -122,9 +152,11 @@ def _upscale_with_rtx_vsr(images: torch.Tensor, width: int, height: int) -> torc
         if frames_chw.device.type != "cuda":
             frames_chw = frames_chw.cuda()
         upscaled = []
-        for i in range(int(frames_chw.shape[0])):
+        n = int(frames_chw.shape[0])
+        for i in range(n):
             dlpack_out = nvvfx_sr.run(frames_chw[i]).image
             upscaled.append(torch.from_dlpack(dlpack_out).clone())
+            _report_upscale_frames(i + 1, n, on_phase=on_phase, pbar=pbar)
         return torch.stack(upscaled, dim=0).movedim(1, -1)
     finally:
         try:
@@ -133,7 +165,14 @@ def _upscale_with_rtx_vsr(images: torch.Tensor, width: int, height: int) -> torc
             pass
 
 
-def _upscale_with_model(upscale_model, images: torch.Tensor, chunk: int = 4) -> torch.Tensor:
+def _upscale_with_model(
+    upscale_model,
+    images: torch.Tensor,
+    chunk: int = 4,
+    *,
+    on_phase=None,
+    pbar=None,
+) -> torch.Tensor:
     from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
 
     n = int(images.shape[0])
@@ -144,6 +183,7 @@ def _upscale_with_model(upscale_model, images: torch.Tensor, chunk: int = 4) -> 
         out = node.upscale(upscale_model, batch)
         frame = _unpack(out)[0]
         parts.append(frame)
+        _report_upscale_frames(min(i + int(frame.shape[0]), n), n, on_phase=on_phase, pbar=pbar)
     return torch.cat(parts, dim=0)
 
 
@@ -154,25 +194,34 @@ def upscale_image_batch(
     height: int,
     upscale_model=None,
     upscale_method: str = "lanczos",
+    on_phase=None,
 ) -> torch.Tensor:
     width, height = ensure_minimax_canvas(width, height)
     method = str(upscale_method or "lanczos").strip().lower()
+    n = int(images.shape[0])
+    pbar = _make_upscale_pbar(n)
+    _report_upscale_frames(0, n, on_phase=on_phase, pbar=pbar)
     work = images
     if method == "nvidia_rtx_vsr":
         try:
-            work = _upscale_with_rtx_vsr(images, width, height)
+            work = _upscale_with_rtx_vsr(
+                images, width, height, on_phase=on_phase, pbar=pbar,
+            )
         except Exception as exc:
             log.warning("nvidia_rtx_vsr failed (%s); falling back to interpolate.", exc)
             work = images
     elif upscale_model is not None:
         try:
-            work = _upscale_with_model(upscale_model, images)
+            work = _upscale_with_model(
+                upscale_model, images, on_phase=on_phase, pbar=pbar,
+            )
         except Exception as exc:
             log.warning("Upscale model failed (%s); falling back to interpolate.", exc)
             work = images
     h, w = int(work.shape[1]), int(work.shape[2])
     if w != width or h != height:
         work = _scale_images(work, width, height)
+    _report_upscale_frames(n, n, on_phase=on_phase, pbar=pbar)
     return work
 
 
@@ -224,12 +273,16 @@ def apply_segment_refine(
     on_step_preview: StepPreviewCallback | None = None,
     first_pass_images: torch.Tensor | None = None,
     trim_frames: int = 0,
+    on_pass: RefinePassCallback | None = None,
 ) -> tuple[dict, str]:
     """Run optional refine/upscale second sample. Never raises — returns first-pass on failure.
 
     ``first_pass_images``: already-decoded first-pass frames (skips a second VAE
     decode in upscale mode). Includes motion-context prefix when continuity is on.
     ``trim_frames``: pinned prefix length from first pass (0 = no continuity).
+    ``passes``: sample this many times after first-pass. Upscale (if any) runs
+    once before pass 1; later passes are same-canvas refine only.
+    ``on_pass(pass_index, n_passes, latent)``: after each sample (1-based).
     First-pass sampling is unchanged — this only runs after it.
     """
     pack = getattr(plan, "refine", None)
@@ -241,8 +294,13 @@ def apply_segment_refine(
     mode = pack.get("mode") or "refine"
     denoise = float(pack.get("denoise") or 0.25)
     r_steps = refine_steps_for(pack, first_steps)
-    r_seed = refine_seed_for(pack, seed)
+    n_passes = refine_passes_for(pack)
+    refine_model = refine_model_for(pack, model)
     note_parts = [f"{mode} denoise={denoise:.2f} steps={r_steps}"]
+    if n_passes > 1:
+        note_parts.append(f"passes={n_passes}")
+    if refine_model is not model:
+        note_parts.append("custom model")
     pin_frames = max(0, int(trim_frames or 0))
     task_key = str(getattr(seg, "task_key", "") or "")
 
@@ -250,6 +308,7 @@ def apply_segment_refine(
     # No continuity → drop stray masks so refine can touch the whole clip.
     work = dict(samples) if pin_frames > 0 else _latent_without_mask(samples)
     refine_positive = positive
+    last_ok = samples
     try:
         if mode == "upscale":
             tw = int(pack.get("target_width") or 0)
@@ -266,12 +325,27 @@ def apply_segment_refine(
                 frames = first_pass_images
             else:
                 frames = _decode_video(vae, video_latent)
+            method = pack.get("upscale_method") or "lanczos"
+            if method == "nvidia_rtx_vsr":
+                how = "nvidia_rtx_vsr"
+            elif pack.get("has_upscale_model"):
+                how = "upscale_model"
+            else:
+                how = "lanczos"
+            log.info(
+                "Director upscale: %d frames via %s → %d×%d",
+                int(frames.shape[0]),
+                how,
+                tw,
+                th,
+            )
             frames = upscale_image_batch(
                 frames,
                 width=tw,
                 height=th,
                 upscale_model=pack.get("upscale_model"),
-                upscale_method=pack.get("upscale_method") or "lanczos",
+                upscale_method=method,
+                on_phase=on_phase,
             )
             encoded = _encode_video(vae, frames)
             work = _join_av(encoded, audio_latent, work)
@@ -305,33 +379,56 @@ def apply_segment_refine(
             if on_phase:
                 on_phase("upscale", 1)
 
-        if on_phase:
-            on_phase("refine", 0)
-        work = sample_single_stage(
-            model=model,
-            positive=refine_positive,
-            negative=negative,
-            latent=work,
-            seed=r_seed,
-            cfg=cfg,
-            steps=r_steps,
-            sampler_name=sampler_name,
-            scheduler=scheduler,
-            shift_video=shift_video,
-            shift_audio=shift_audio,
-            denoise=denoise,
-            on_phase=None,
-            on_step_preview=on_step_preview,
-            preview_every=1,
-            phase_name="refine",
-        )
+        # Pass 1 samples after optional upscale; later passes are same-canvas refine only.
+        for i in range(n_passes):
+            log.info(
+                "Director refine pass %d/%d (steps=%d%s)",
+                i + 1,
+                n_passes,
+                r_steps,
+                ", custom model" if refine_model is not model else "",
+            )
+            if on_phase:
+                on_phase("refine", (i + 0.5) / n_passes)
+            work = sample_single_stage(
+                model=refine_model,
+                positive=refine_positive,
+                negative=negative,
+                latent=work,
+                seed=refine_seed_for(pack, seed, pass_index=i),
+                cfg=cfg,
+                steps=r_steps,
+                sampler_name=sampler_name,
+                scheduler=scheduler,
+                shift_video=shift_video,
+                shift_audio=shift_audio,
+                denoise=denoise,
+                on_phase=None,
+                on_step_preview=on_step_preview,
+                preview_every=1,
+                phase_name="refine",
+            )
+            last_ok = work
+            if on_pass is not None:
+                try:
+                    on_pass(i + 1, n_passes, work)
+                except Exception as exc:
+                    log.warning(
+                        "Segment %s refine pass %d hook failed (%s).",
+                        int(getattr(seg, "index", 0)) + 1,
+                        i + 1,
+                        exc,
+                    )
         if on_phase:
             on_phase("refine", 1)
         return work, "refine " + ", ".join(note_parts)
     except Exception as exc:
         log.warning(
-            "Segment %s refine failed (%s); keeping first-pass latent.",
+            "Segment %s refine failed (%s); keeping %s.",
             int(getattr(seg, "index", 0)) + 1,
             exc,
+            "last successful pass" if last_ok is not samples else "first-pass latent",
         )
+        if last_ok is not samples:
+            return last_ok, f"refine FAILED ({exc}); kept last good pass"
         return samples, f"refine FAILED ({exc}); used first pass"
