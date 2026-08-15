@@ -2208,7 +2208,6 @@ function _clearBatchListFillStyles(list, host, wrap, panel) {
         list.style.maxHeight = "";
         list.style.minHeight = "";
         list.style.flex = "";
-        list.classList?.remove("bd-batch-solo");
         for (const card of list.querySelectorAll?.(".bd-batch-card") || []) {
             card.style.flex = "";
             card.style.minHeight = "";
@@ -2452,18 +2451,11 @@ export function syncBatchPanelFillHeight(editor, opts = {}) {
             list.style.maxHeight = "";
         }
 
-        const solo = (editor.timeline?.segments?.length || 0) <= 1;
-        list.classList.toggle("bd-batch-solo", solo);
+        // Cards keep their content height; only the list viewport fills a stretched node.
         for (const card of list.querySelectorAll(".bd-batch-card")) {
-            if (solo && (listH > 0 || !trusted)) {
-                card.style.flex = "1 1 auto";
-                card.style.minHeight = "0";
-                card.style.height = "100%";
-            } else {
-                card.style.flex = "";
-                card.style.minHeight = "";
-                card.style.height = "";
-            }
+            card.style.flex = "";
+            card.style.minHeight = "";
+            card.style.height = "";
         }
 
         _mmxHeightDebug({
