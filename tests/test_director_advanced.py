@@ -26,7 +26,7 @@ def load_advanced_module():
             return {"required": {}, "optional": {"shift_video": ("FLOAT", {}), "shift_audio": ("FLOAT", {})}}
 
         def execute(self, **kwargs):
-            calls.append(("director", kwargs["model"], kwargs["_apply_sigma_shift"]))
+            calls.append(("director", kwargs["model"]))
             return kwargs
 
     director_module = types.ModuleType(f"{package_name}.nodes.director")
@@ -45,7 +45,6 @@ def load_advanced_module():
     comfy_extras = types.ModuleType("comfy_extras")
     comfy_extras.__path__ = []
     easycache_module = types.ModuleType("comfy_extras.nodes_easycache")
-    minimax_module = types.ModuleType("comfy_extras.nodes_minimax_h3")
 
     class EasyCacheNode:
         @classmethod
@@ -53,14 +52,7 @@ def load_advanced_module():
             calls.append(("easycache", threshold, start, end, verbose))
             return FakeNodeOutput(f"{model}>easycache")
 
-    class MiniMaxH3SigmaShift:
-        @classmethod
-        def execute(cls, model, video, audio):
-            calls.append(("sampling", video, audio))
-            return FakeNodeOutput(f"{model}>sampling")
-
     easycache_module.EasyCacheNode = EasyCacheNode
-    minimax_module.MiniMaxH3SigmaShift = MiniMaxH3SigmaShift
 
     module_name = f"{package_name}.nodes.director_advanced"
     modules = {
@@ -71,7 +63,6 @@ def load_advanced_module():
         "nodes": core_nodes,
         "comfy_extras": comfy_extras,
         "comfy_extras.nodes_easycache": easycache_module,
-        "comfy_extras.nodes_minimax_h3": minimax_module,
     }
     modules.pop(module_name)
     module_patch = patch.dict(sys.modules, modules)
@@ -103,20 +94,27 @@ class AdvancedDirectorTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "between -100 and 100"):
             self.module._parse_loras('[{"name": "bad.safetensors", "strength": 101}]')
 
+    def test_sampling_shift_inputs_remain_owned_by_the_base_director(self):
+        optional = self.module.MiniMaxH3DirectorAdvanced.INPUT_TYPES()["optional"]
+
+        self.assertIn("shift_video", optional)
+        self.assertIn("shift_audio", optional)
+        self.assertNotIn("enable_model_sampling", optional)
+
     def test_disabled_enhancements_pass_the_original_model_to_director(self):
         result = self.module.MiniMaxH3DirectorAdvanced().execute(
             model="base",
             video_vae="video",
             audio_vae="audio",
             clip="clip",
-            enable_model_sampling=False,
             shift_video=12,
             shift_audio=3,
         )
 
         self.assertEqual(result["model"], "base")
-        self.assertFalse(result["_apply_sigma_shift"])
-        self.assertEqual(self.calls, [("director", "base", False)])
+        self.assertEqual(result["shift_video"], 12)
+        self.assertEqual(result["shift_audio"], 3)
+        self.assertEqual(self.calls, [("director", "base")])
 
     def test_enabled_enhancements_apply_in_model_preparation_order(self):
         calls = self.calls
@@ -162,10 +160,10 @@ class AdvancedDirectorTest(unittest.TestCase):
             shift_audio=2,
         )
 
-        self.assertTrue(result["model"].endswith(">sampling>sage>memory>sol>easycache"))
+        self.assertTrue(result["model"].endswith(">sage>memory>sol>easycache"))
         self.assertEqual(
             [call[0] for call in self.calls],
-            ["lora", "lora", "sampling", "sage", "memory", "sol", "easycache", "director"],
+            ["lora", "lora", "sage", "memory", "sol", "easycache", "director"],
         )
         self.assertEqual(self.calls[0], ("lora", "one.safetensors", 0.75))
         self.assertEqual(self.calls[1], ("lora", "two.safetensors", -0.5))
@@ -177,7 +175,6 @@ class AdvancedDirectorTest(unittest.TestCase):
                 video_vae="video",
                 audio_vae="audio",
                 clip="clip",
-                enable_model_sampling=False,
                 enable_sage_attention=True,
             )
 

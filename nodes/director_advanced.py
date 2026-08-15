@@ -7,7 +7,6 @@ from typing import Any
 
 import nodes
 from comfy_extras.nodes_easycache import EasyCacheNode
-from comfy_extras.nodes_minimax_h3 import MiniMaxH3SigmaShift
 
 from .director import MiniMaxH3Director
 
@@ -78,7 +77,7 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
 
     DESCRIPTION = (
         "MiniMax H3 Director with ordered model-only LoRAs and optional "
-        "sampling, attention, Sol-Attn, and EasyCache patches."
+        "attention, Sol-Attn, and EasyCache patches."
     )
 
     @classmethod
@@ -95,7 +94,6 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
                         "tooltip": "LoRA rows managed by the Director model enhancements panel.",
                     },
                 ),
-                "enable_model_sampling": ("BOOLEAN", {"default": True}),
                 "enable_sage_attention": ("BOOLEAN", {"default": False}),
                 "sage_attention": (SAGE_ATTENTION_MODES, {"default": "auto"}),
                 "allow_sage_compile": ("BOOLEAN", {"default": False}),
@@ -134,7 +132,6 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
         audio_vae: Any,
         clip: Any,
         lora_config: str = "[]",
-        enable_model_sampling: bool = True,
         enable_sage_attention: bool = False,
         sage_attention: str = "auto",
         allow_sage_compile: bool = False,
@@ -166,11 +163,6 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
                 lora["name"],
                 lora["strength"],
             )[0]
-
-        shift_video = float(kwargs.get("shift_video", 12.0))
-        shift_audio = float(kwargs.get("shift_audio", 3.0))
-        if enable_model_sampling:
-            model = _first_output(MiniMaxH3SigmaShift.execute(model, shift_video, shift_audio))
 
         if enable_sage_attention:
             patcher = _registered_node("PathchSageAttentionKJ")()
@@ -217,6 +209,5 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
             video_vae=video_vae,
             audio_vae=audio_vae,
             clip=clip,
-            _apply_sigma_shift=False,
             **kwargs,
         )

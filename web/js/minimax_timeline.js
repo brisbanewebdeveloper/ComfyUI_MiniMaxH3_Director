@@ -322,7 +322,7 @@ const HIDDEN_WIDGETS = [
 ];
 
 const ADVANCED_HIDDEN_WIDGETS = [
-    "lora_config", "enable_model_sampling", "shift_video", "shift_audio",
+    "lora_config",
     "enable_sage_attention", "sage_attention", "allow_sage_compile",
     "enable_h3_mem_eff_sage", "enable_sol_attn", "sol_tau",
     "sol_start_percent", "sol_end_percent", "sol_min_tokens", "sol_int8_qk",
@@ -333,10 +333,6 @@ const ADVANCED_HIDDEN_WIDGETS = [
 ];
 
 const ADVANCED_MODEL_GROUPS = [
-    ["ModelSamplingMiniMaxH3", [
-        ["enable_model_sampling", "enabled"], ["shift_video", "shift_video"],
-        ["shift_audio", "shift_audio"],
-    ]],
     ["Patch Sage Attention KJ", [
         ["enable_sage_attention", "enabled"], ["sage_attention", "sage_attention"],
         ["allow_sage_compile", "allow_compile"],
@@ -766,14 +762,15 @@ const STYLES = `
 .bd-continuous-ref label{display:flex;align-items:center;gap:4px;cursor:pointer}
 .bd-continuous-ref input[type="checkbox"]{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
 .bd-gen-fc-row{display:flex;align-items:center;gap:6px;margin-top:6px}
-.bd-model-enhancements{border:1px solid #424858;border-radius:6px;background:#20242d;padding:7px;max-height:260px;overflow:auto}
+.bd-model-enhancements{border:1px solid #424858;border-radius:6px;background:#20242d;padding:7px}
 .bd-model-enhancements>summary{cursor:pointer;font-weight:700;color:#aebeff;user-select:none}
-.bd-model-enhancements-body{display:grid;grid-template-columns:minmax(260px,1fr) 2fr;gap:8px;margin-top:8px}
+.bd-model-enhancements-body{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.bd-model-groups{display:flex;flex-direction:column;gap:6px}
 .bd-model-group{border:1px solid #383e4c;border-radius:5px;padding:6px;background:#191c23}
 .bd-model-group>summary{cursor:pointer;font-weight:600;color:#d8dce8}
-.bd-model-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:5px;margin-top:6px}
-.bd-model-field{display:flex;align-items:center;gap:6px;min-width:0}
-.bd-model-field>span{min-width:72px;color:#aeb4c2;overflow:hidden;text-overflow:ellipsis}
+.bd-model-fields{display:flex;flex-direction:column;gap:5px;margin-top:6px}
+.bd-model-field{display:grid;grid-template-columns:minmax(160px,1fr) minmax(0,2fr);align-items:center;gap:8px;min-width:0}
+.bd-model-field>span{min-width:0;color:#aeb4c2;overflow:hidden;text-overflow:ellipsis}
 .bd-model-field input:not([type=checkbox]),.bd-model-field select,.bd-model-field textarea{min-width:0;width:100%;box-sizing:border-box;background:#11141a;color:#e0e0e0;border:1px solid #454c5c;border-radius:3px;padding:3px 5px}
 .bd-lora-list{display:flex;flex-direction:column;gap:5px;margin-top:6px}
 .bd-lora-row{display:grid;grid-template-columns:auto minmax(130px,1fr) 74px auto;gap:5px;align-items:center}
@@ -986,7 +983,10 @@ function buildClipFrameMap(clipIndex, count) {
 const CLIP_SEGMENT_COLORS = ["rgba(255,200,50,0.9)", "rgba(102,170,255,0.9)", "rgba(79,255,143,0.9)", "rgba(255,102,170,0.9)"];
 
 function getDirectorUiHeight(editor) {
-    const advancedHeight = isAdvancedDirectorNode(editor?.node) ? 36 : 0;
+    const advancedPanel = editor?.advancedModelPanel;
+    const advancedHeight = isAdvancedDirectorNode(editor?.node)
+        ? Math.max(36, advancedPanel?.scrollHeight || 0)
+        : 0;
     if (editor?.getDirectorMode?.() === "prompt_batch") {
         const batchH = getImageBatchUiHeight(editor);
         // r2v shows the main timeline track (like fl2v) above batch cards.
@@ -1548,6 +1548,7 @@ function renderAdvancedLoras(editor) {
         empty.dataset.i18n = "advanced.noLoras";
         empty.textContent = t("advanced.noLoras");
         list.appendChild(empty);
+        queueMicrotask(() => editor.updateDomWidgetHeight?.());
         return;
     }
 
@@ -1594,6 +1595,7 @@ function renderAdvancedLoras(editor) {
         row.append(enabled, name, strength, remove);
         list.appendChild(row);
     });
+    queueMicrotask(() => editor.updateDomWidgetHeight?.());
 }
 
 async function loadAdvancedLoraNames(editor) {
@@ -1656,7 +1658,7 @@ function mountAdvancedModelPanel(editor) {
     body.appendChild(loraGroup);
 
     const patches = document.createElement("div");
-    patches.className = "bd-model-fields";
+    patches.className = "bd-model-groups";
     for (const [title, fields] of ADVANCED_MODEL_GROUPS) {
         const group = document.createElement("details");
         group.className = "bd-model-group";
@@ -1670,10 +1672,13 @@ function mountAdvancedModelPanel(editor) {
             if (field) controls.appendChild(field);
         }
         group.appendChild(controls);
+        group.addEventListener("toggle", () => queueMicrotask(() => editor.updateDomWidgetHeight?.()));
         patches.appendChild(group);
     }
     body.appendChild(patches);
     panel.appendChild(body);
+    panel.addEventListener("toggle", () => queueMicrotask(() => editor.updateDomWidgetHeight?.()));
+    editor.advancedModelPanel = panel;
     renderAdvancedLoras(editor);
     loadAdvancedLoraNames(editor);
     return panel;

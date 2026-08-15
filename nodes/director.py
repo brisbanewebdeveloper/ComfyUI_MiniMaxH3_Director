@@ -195,7 +195,6 @@ class MiniMaxH3Director:
         shift_audio=3.0,
         clear_vram_between_segments=True,
         export_source_images=False,
-        _apply_sigma_shift=True,
         **kwargs,
     ):
         del kwargs
@@ -231,7 +230,6 @@ class MiniMaxH3Director:
                 shift_video=shift_video,
                 shift_audio=shift_audio,
                 clear_vram_between_segments=clear_vram_between_segments,
-                apply_sigma_shift=_apply_sigma_shift,
             )
         )
 
