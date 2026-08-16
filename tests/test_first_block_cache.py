@@ -102,6 +102,36 @@ class FirstBlockCacheTest(unittest.TestCase):
         holder = options["minimax_h3_firstblock_cache"]
         self.assertEqual((holder.calls, holder.compute, holder.reuse), (3, 2, 1))
 
+    def test_cache_measures_residual_when_first_block_updates_input_in_place(self):
+        model = self.module.apply_first_block_cache(FakeModel(), threshold=0.08)
+        options = model.model_options["transformer_options"]
+        replacements = options["patches_replace"]["dit"]
+        calls = [0, 0, 0]
+
+        def original(index):
+            def run(args):
+                calls[index] += 1
+                if index == 0:
+                    args["img"].mul_(2.0)
+                else:
+                    args["img"].add_(10.0 if index == 1 else 100.0)
+                return {"img": args["img"]}
+
+            return run
+
+        def run_stack(value):
+            hidden = torch.tensor([value])
+            for index in range(3):
+                hidden = replacements[("double_block", index)](
+                    {"img": hidden, "transformer_options": options},
+                    {"original_block": original(index)},
+                )["img"]
+            return hidden
+
+        self.assertTrue(torch.equal(run_stack(1.0), torch.tensor([112.0])))
+        self.assertTrue(torch.allclose(run_stack(1.04), torch.tensor([112.08])))
+        self.assertEqual(calls, [2, 1, 1])
+
     def test_cache_state_is_isolated_by_conditioning_key(self):
         holder = self.module.FirstBlockCacheHolder(0.08)
         first = {"uuids": ["first"]}
@@ -126,6 +156,70 @@ class FirstBlockCacheTest(unittest.TestCase):
 
         self.assertFalse(reused)
         self.assertEqual((holder.compute, holder.reuse), (2, 0))
+
+    def test_refresh_releases_obsolete_tail_before_running_blocks(self):
+        holder = self.module.FirstBlockCacheHolder(0.08)
+        options = {}
+        holder.after_head(torch.ones(1), torch.full((1,), 2.0), options)
+        holder.after_tail(torch.full((1,), 5.0), options)
+
+        _, reused = holder.after_head(torch.ones(1), torch.full((1,), 3.0), options)
+
+        self.assertFalse(reused)
+        state = holder.state_for(options)
+        self.assertIsNone(state.tail_residual)
+        self.assertIsNotNone(state.pending_head_output)
+
+    def test_large_cache_is_bypassed_and_runs_the_full_stack(self):
+        model = self.module.apply_first_block_cache(FakeModel(), threshold=0.08)
+        options = model.model_options["transformer_options"]
+        replacements = options["patches_replace"]["dit"]
+        calls = [0, 0, 0]
+
+        def original(index):
+            def run(args):
+                calls[index] += 1
+                return {"img": args["img"] * 2.0 if index == 0 else args["img"] + 10.0}
+
+            return run
+
+        def run_stack(value):
+            hidden = torch.tensor([value])
+            for index in range(3):
+                hidden = replacements[("double_block", index)](
+                    {"img": hidden, "transformer_options": options},
+                    {"original_block": original(index)},
+                )["img"]
+            return hidden
+
+        with self.assertLogs(self.module._log, level="WARNING") as logs:
+            with patch.object(self.module, "_MAX_RETAINED_CACHE_BYTES", 1):
+                first = run_stack(1.0)
+                second = run_stack(1.04)
+
+        self.assertTrue(torch.equal(first, torch.tensor([22.0])))
+        self.assertTrue(torch.allclose(second, torch.tensor([22.08])))
+        self.assertEqual(calls, [2, 2, 2])
+        self.assertIn("FirstBlockCache bypassed for this execution", logs.output[0])
+        holder = options["minimax_h3_firstblock_cache"]
+        self.assertEqual((holder.calls, holder.compute, holder.reuse), (2, 2, 0))
+        state = holder.state_for(options)
+        self.assertTrue(state.cache_disabled)
+        self.assertIsNone(state.previous_head_residual)
+        self.assertIsNone(state.tail_residual)
+        self.assertIsNone(state.pending_head_output)
+
+    def test_device_pressure_bypasses_cache_below_required_headroom(self):
+        hidden = types.SimpleNamespace(
+            numel=lambda: 1,
+            element_size=lambda: 2,
+            device=torch.device("cuda"),
+        )
+
+        with patch.object(torch.cuda, "mem_get_info", return_value=(3 * 1024**3, 24 * 1024**3)):
+            reason = self.module._cache_bypass_reason(hidden)
+
+        self.assertIn("device headroom", reason)
 
     def test_install_preserves_an_existing_block_replacement(self):
         model = FakeModel()

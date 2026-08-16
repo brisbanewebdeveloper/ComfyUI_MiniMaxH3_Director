@@ -15,6 +15,9 @@ import comfy.patcher_extension
 
 _CACHE_KEY = "minimax_h3_firstblock_cache"
 _WRAPPER_KEY = "minimax_h3_firstblock_cache"
+_MAX_RETAINED_CACHE_BYTES = 768 * 1024**2
+_MIN_DEVICE_HEADROOM_BYTES = 4 * 1024**3
+_DEVICE_HEADROOM_FRACTION = 0.15
 _log = logging.getLogger("ComfyUI-MiniMaxH3-Director.firstblock_cache")
 
 
@@ -24,6 +27,7 @@ class _CacheState:
     tail_residual: torch.Tensor | None = None
     pending_head_output: torch.Tensor | None = None
     skip_tail: bool = False
+    cache_disabled: bool = False
 
 
 def _execution_key(transformer_options: dict[str, Any]) -> tuple[str, ...]:
@@ -44,6 +48,30 @@ def _relative_l1(current: torch.Tensor, previous: torch.Tensor) -> float:
         )
     )
     return float((totals[0] / totals[1].clamp_min(1.0e-8)).item())
+
+
+def _cache_bypass_reason(hidden: torch.Tensor) -> str | None:
+    tensor_bytes = hidden.numel() * hidden.element_size()
+    retained_bytes = tensor_bytes * 2
+    if retained_bytes > _MAX_RETAINED_CACHE_BYTES:
+        return (
+            f"estimated retained cache {retained_bytes / 1024**2:.0f} MiB exceeds "
+            f"the conservative {_MAX_RETAINED_CACHE_BYTES / 1024**2:.0f} MiB limit"
+        )
+
+    if hidden.device.type == "cuda":
+        free_bytes, total_bytes = torch.cuda.mem_get_info(hidden.device)
+        reserve_bytes = max(_MIN_DEVICE_HEADROOM_BYTES, int(total_bytes * _DEVICE_HEADROOM_FRACTION))
+        # Initial population also needs a saved block input and a fresh residual
+        # before the two retained tensors settle into their steady state.
+        working_bytes = tensor_bytes * 3
+        if free_bytes - working_bytes < reserve_bytes:
+            return (
+                f"estimated retained cache {retained_bytes / 1024**2:.0f} MiB would leave "
+                f"less than {reserve_bytes / 1024**3:.1f} GiB of device headroom"
+            )
+
+    return None
 
 
 class FirstBlockCacheHolder:
@@ -71,17 +99,52 @@ class FirstBlockCacheHolder:
     def state_for(self, transformer_options: dict[str, Any]) -> _CacheState:
         return self.states.setdefault(_execution_key(transformer_options), _CacheState())
 
-    def after_head(
+    def prepare_head(
         self,
         head_input: torch.Tensor,
+        transformer_options: dict[str, Any],
+    ) -> torch.Tensor | None:
+        state = self.state_for(transformer_options)
+        if state.cache_disabled:
+            return None
+
+        cached = state.previous_head_residual
+        if cached is not None and (
+            cached.shape != head_input.shape
+            or cached.dtype != head_input.dtype
+            or cached.device != head_input.device
+        ):
+            state.previous_head_residual = None
+            state.tail_residual = None
+
+        if state.previous_head_residual is None and state.tail_residual is None:
+            bypass_reason = _cache_bypass_reason(head_input)
+            if bypass_reason is not None:
+                state.cache_disabled = True
+                _log.warning("FirstBlockCache bypassed for this execution: %s.", bypass_reason)
+                return None
+
+        # MiniMax H3 blocks update their input in place, so preserve the value
+        # used to calculate the first-block residual before running the block.
+        return head_input.detach().clone()
+
+    def after_head(
+        self,
+        head_input: torch.Tensor | None,
         head_output: torch.Tensor,
         transformer_options: dict[str, Any],
     ) -> tuple[torch.Tensor, bool]:
         state = self.state_for(transformer_options)
-        head_residual = (head_output - head_input).detach()
         state.pending_head_output = None
         state.skip_tail = False
         self.calls += 1
+
+        if state.cache_disabled or head_input is None:
+            state.cache_disabled = True
+            self.compute += 1
+            return head_output, False
+
+        head_residual = (head_output - head_input).detach()
 
         cached = state.previous_head_residual
         if cached is not None and (
@@ -108,7 +171,10 @@ class FirstBlockCacheHolder:
                 return head_output + state.tail_residual, True
 
         self.compute += 1
-        state.previous_head_residual = head_residual.clone()
+        # A refresh no longer needs the previous tail. Releasing it here avoids
+        # retaining three full hidden-state tensors while the block stack runs.
+        state.tail_residual = None
+        state.previous_head_residual = head_residual
         state.pending_head_output = head_output.detach().clone()
         if self.verbose:
             detail = "initial refresh" if relative_l1 is None else f"relative_l1={relative_l1:.6f}"
@@ -117,6 +183,8 @@ class FirstBlockCacheHolder:
 
     def after_tail(self, hidden: torch.Tensor, transformer_options: dict[str, Any]) -> torch.Tensor:
         state = self.state_for(transformer_options)
+        if state.cache_disabled:
+            return hidden
         if state.pending_head_output is None:
             raise RuntimeError("FirstBlockCache completed a refresh without a first-block output")
         state.tail_residual = (hidden - state.pending_head_output).detach()
@@ -174,7 +242,7 @@ class _BlockPatch:
         holder: FirstBlockCacheHolder = transformer_options[_CACHE_KEY]
 
         if self.index == 0:
-            head_input = args["img"]
+            head_input = holder.prepare_head(args["img"], transformer_options)
             head_output = self._run_block(args, extra_options)
             hidden, _ = holder.after_head(head_input, head_output, transformer_options)
             return {"img": hidden}
