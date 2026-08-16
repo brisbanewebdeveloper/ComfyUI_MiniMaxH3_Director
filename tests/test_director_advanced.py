@@ -231,6 +231,36 @@ class AdvancedDirectorTest(unittest.TestCase):
 
         self.assertEqual(self.calls, [])
 
+    def test_firstblock_cache_rejects_legacy_shifted_types(self):
+        with self.assertRaisesRegex(ValueError, "enabled must be a Boolean"):
+            self.module.MiniMaxH3DirectorAdvanced().execute(
+                model="base",
+                video_vae="video",
+                audio_vae="audio",
+                clip="clip",
+                enable_firstblock_cache="Performance",
+            )
+
+        with self.assertRaisesRegex(ValueError, "threshold must be a finite number"):
+            self.module.MiniMaxH3DirectorAdvanced().execute(
+                model="base",
+                video_vae="video",
+                audio_vae="audio",
+                clip="clip",
+                firstblock_cache_threshold=True,
+            )
+
+        with self.assertRaisesRegex(ValueError, "verbose must be a Boolean"):
+            self.module.MiniMaxH3DirectorAdvanced().execute(
+                model="base",
+                video_vae="video",
+                audio_vae="audio",
+                clip="clip",
+                firstblock_cache_verbose="false",
+            )
+
+        self.assertEqual(self.calls, [])
+
     def test_prompt_group_loras_are_isolated_and_follow_shared_loras(self):
         result = self.module.MiniMaxH3DirectorAdvanced().execute(
             model="base",

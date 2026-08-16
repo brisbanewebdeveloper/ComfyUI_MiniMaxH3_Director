@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 import nodes
@@ -84,6 +85,15 @@ def _load_loras(model: Any, raw: str | list[Any]) -> Any:
             lora["strength"],
         )[0]
     return model
+
+
+def _validate_firstblock_cache_inputs(enabled: Any, threshold: Any, verbose: Any) -> None:
+    if not isinstance(enabled, bool):
+        raise ValueError("FirstBlockCache enabled must be a Boolean.")
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold):
+        raise ValueError("FirstBlockCache threshold must be a finite number.")
+    if not isinstance(verbose, bool):
+        raise ValueError("FirstBlockCache verbose must be a Boolean.")
 
 
 class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
@@ -192,6 +202,11 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
         firstblock_cache_verbose: bool = False,
         **kwargs: Any,
     ) -> Any:
+        _validate_firstblock_cache_inputs(
+            enable_firstblock_cache,
+            firstblock_cache_threshold,
+            firstblock_cache_verbose,
+        )
         if enable_firstblock_cache and enable_easycache:
             raise ValueError("FirstBlockCache and EasyCache cannot both be enabled; choose one cache")
 

@@ -1537,6 +1537,7 @@ function makeAdvancedWidgetField(editor, name, label) {
         control.addEventListener("change", () => updateAdvancedWidget(editor, widget, control.value));
     }
     row.appendChild(control);
+    control.dataset.widgetName = name;
     return row;
 }
 
@@ -1695,6 +1696,43 @@ function mountAdvancedModelPanel(editor) {
     renderAdvancedLoras(editor);
     loadAdvancedLoraNames(editor);
     return panel;
+}
+
+function advancedControlMatchesValue(control, value) {
+    if (typeof value === "boolean") return control?.type === "checkbox";
+    if (typeof value === "number") return control?.type === "number";
+    if (Array.isArray(value)) return control?.tagName === "SELECT";
+    return value === undefined || control?.type === "text" || control?.tagName === "TEXTAREA";
+}
+
+function syncAdvancedModelPanel(editor) {
+    const panel = editor?.advancedModelPanel;
+    if (!panel) return true;
+    let matches = true;
+    for (const [, fields] of ADVANCED_MODEL_GROUPS) {
+        for (const [name] of fields) {
+            const widget = editor.widget(name);
+            const control = panel.querySelector(`[data-widget-name="${name}"]`);
+            if (!widget || !control) continue;
+            if (!advancedControlMatchesValue(control, widget.value)) {
+                matches = false;
+                continue;
+            }
+            if (control.type === "checkbox") control.checked = widget.value === true;
+            else control.value = widget.value ?? "";
+        }
+    }
+    return matches;
+}
+
+function refreshAdvancedModelPanel(editor) {
+    const previous = editor?.advancedModelPanel;
+    if (!previous) return;
+    const open = previous.open;
+    const panel = mountAdvancedModelPanel(editor);
+    previous.replaceWith(panel);
+    panel.open = open;
+    syncAdvancedModelPanel(editor);
 }
 
 class MiniMaxH3DirectorEditor {
@@ -10065,6 +10103,28 @@ function isAdvancedDirectorNode(node) {
     return cls === "MiniMaxH3DirectorAdvanced";
 }
 
+function migrateAdvancedWidgetValues(node, config) {
+    if (!isAdvancedDirectorNode(node) || !Array.isArray(config?.widgets_values)) return false;
+    const firstIndex = node.widgets?.findIndex((widget) => widget.name === "enable_firstblock_cache") ?? -1;
+    if (firstIndex < 0) return false;
+
+    const values = config.widgets_values;
+    const widgetCount = node.widgets.length;
+    if (values.length === widgetCount - 3) {
+        values.splice(firstIndex, 0, false, 0.08, false);
+        return true;
+    }
+    if (values.length !== widgetCount) return false;
+
+    const valid = typeof values[firstIndex] === "boolean"
+        && typeof values[firstIndex + 1] === "number"
+        && Number.isFinite(values[firstIndex + 1])
+        && typeof values[firstIndex + 2] === "boolean";
+    if (valid) return false;
+    values.splice(firstIndex, 3, false, 0.08, false);
+    return true;
+}
+
 function isDirectorNodeDef(nodeType, nodeData) {
     const cls = nodeType?.comfyClass || nodeData?.name || "";
     return cls === "MiniMaxH3Director"
@@ -10365,11 +10425,13 @@ app.registerExtension({
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
             normalizeDirectorOutputs(this);
+            migrateAdvancedWidgetValues(this, arguments[0]);
             const out = onConfigure?.apply(this, arguments);
             setTimeout(() => {
                 finalizeDirectorWidgetOrder(this);
                 const ed = initDirectorEditor(this) || this._minimaxEditor;
                 if (!ed) return;
+                if (!syncAdvancedModelPanel(ed)) refreshAdvancedModelPanel(ed);
                 const initTotal = Math.max(0, parseInt(ed.totalFramesWidget?.value || 124, 10));
                 const initFps = coerceTimelineFps(ed.frameRateWidget?.value || 24);
                 ed.timeline = parseTimeline(ed.timelineWidget?.value, initTotal, initFps);
