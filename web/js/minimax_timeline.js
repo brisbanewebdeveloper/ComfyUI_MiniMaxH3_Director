@@ -10125,6 +10125,13 @@ function migrateAdvancedWidgetValues(node, config) {
     return true;
 }
 
+function applyConfiguredWidgetValues(node, values) {
+    if (!Array.isArray(values)) return;
+    for (let index = 0; index < values.length && index < node.widgets.length; index++) {
+        node.widgets[index].value = values[index];
+    }
+}
+
 function isDirectorNodeDef(nodeType, nodeData) {
     const cls = nodeType?.comfyClass || nodeData?.name || "";
     return cls === "MiniMaxH3Director"
@@ -10425,8 +10432,10 @@ app.registerExtension({
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
             normalizeDirectorOutputs(this);
-            migrateAdvancedWidgetValues(this, arguments[0]);
+            const config = arguments[0];
+            const migrated = migrateAdvancedWidgetValues(this, config);
             const out = onConfigure?.apply(this, arguments);
+            if (migrated) applyConfiguredWidgetValues(this, config.widgets_values);
             setTimeout(() => {
                 finalizeDirectorWidgetOrder(this);
                 const ed = initDirectorEditor(this) || this._minimaxEditor;
