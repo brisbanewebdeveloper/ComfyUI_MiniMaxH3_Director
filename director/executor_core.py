@@ -55,6 +55,7 @@ from .segment_cache import (
     load_segment_cache,
     load_segment_handoff_meta,
     save_segment_cache,
+    av_latent_to_cpu,
 )
 from .segment_mp4_export import (
     copy_segment_mp4_suffix,
@@ -950,7 +951,12 @@ def execute_director_plan_core(
             # False ⇒ next pin must use context_end_frame = trim+export.
             "official_mc_length": False,
         }
-        completed_av_latents[seg.index] = samples
+        # Continuity needs only the previous segment's latent. Keep that handoff
+        # on CPU so segment cleanup can reclaim the sampling tensors from VRAM.
+        cpu_samples = av_latent_to_cpu(samples)
+        completed_av_latents.clear()
+        completed_av_latents[seg.index] = cpu_samples
+        del samples
         completed_av_handoff[seg.index] = handoff
         if isinstance(audio_dict, dict) and audio_dict.get("waveform") is not None:
             completed_audios[seg.index] = audio_dict
@@ -959,7 +965,7 @@ def execute_director_plan_core(
             seg,
             plan,
             chunk,
-            av_latent=samples,
+            av_latent=cpu_samples,
             handoff=handoff,
             audio=audio_dict if isinstance(audio_dict, dict) else None,
         )

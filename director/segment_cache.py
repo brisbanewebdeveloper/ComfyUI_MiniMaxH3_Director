@@ -184,7 +184,7 @@ def save_segment_cache(
             lambda p: p.write_text(text, encoding="utf-8"),
         )
         if av_latent is not None and isinstance(av_latent, dict) and "samples" in av_latent:
-            cpu_latent = _av_latent_to_cpu(av_latent)
+            cpu_latent = av_latent_to_cpu(av_latent)
             _write_via_temp(latent_path, lambda p: torch.save(cpu_latent, p))
         if handoff:
             _write_via_temp(
@@ -257,7 +257,8 @@ def load_segment_handoff_meta(
         return None
 
 
-def _av_latent_to_cpu(av_latent: dict) -> dict:
+def av_latent_to_cpu(av_latent: dict) -> dict:
+    """Detach an AV latent payload from its sampling device."""
     samples = av_latent["samples"]
     nested_samples = False
     if hasattr(samples, "unbind"):
