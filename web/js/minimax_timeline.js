@@ -1249,8 +1249,9 @@ function installDirectorClipboardGuard() {
     document.__mmxDirectorClipboardGuard = true;
 
     const blockBubbleToCanvas = (e) => {
-        if (!directorEditableFromEventTarget(e.target)
-            && !directorEditableFromEventTarget(document.activeElement)) {
+        const editable = directorEditableFromEventTarget(e.target)
+            || directorEditableFromEventTarget(document.activeElement);
+        if (!editable || editable.classList?.contains("bd-token-editor")) {
             return;
         }
         e.stopImmediatePropagation();

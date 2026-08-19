@@ -852,9 +852,13 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
         openIfMention();
     });
 
+    for (const type of ["copy", "cut"]) {
+        rich.addEventListener(type, (e) => e.stopPropagation());
+    }
+
     rich.addEventListener("keydown", (e) => {
-        // contenteditable is not INPUT/TEXTAREA — Comfy treats Ctrl+V as graph paste.
-        if ((e.ctrlKey || e.metaKey) && ["v", "c", "x"].includes(e.key?.toLowerCase?.())) {
+        // Keep native editing shortcuts inside the contenteditable prompt surface.
+        if ((e.ctrlKey || e.metaKey) && ["a", "v", "c", "x"].includes(e.key?.toLowerCase?.())) {
             e.stopPropagation();
         }
         if (!menu?.classList.contains("hidden") && filtered.length) {
