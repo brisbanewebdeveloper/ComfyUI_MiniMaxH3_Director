@@ -3426,7 +3426,7 @@ class MiniMaxH3DirectorEditor {
     }
 
     retakeSelectedSegment() {
-        if (this.getDirectorMode() !== "video") return;
+        if (this.getDirectorMode() !== "video" || !this.hasVideo()) return;
         const seg = this.timeline.segments?.[this.selectedIndex];
         if (!seg) return;
 
@@ -3472,7 +3472,9 @@ class MiniMaxH3DirectorEditor {
         this.btnRunSelectToggle?.classList.toggle("active", enabled);
         this.btnRunSelectToggle?.classList.toggle("bd-btn-run-select", true);
         this.btnRunSelectToggle?.classList.toggle("hidden", !canRunSelect || useBatchBar);
-        this.btnRetakeSelected?.classList.toggle("hidden", this.getDirectorMode() !== "video");
+        const retakeMode = this.getDirectorMode() === "video";
+        this.btnRetakeSelected?.classList.toggle("hidden", !retakeMode);
+        if (this.btnRetakeSelected) this.btnRetakeSelected.disabled = !retakeMode || !this.hasVideo();
         this.batchRunSelectBtn?.classList.toggle("active", enabled);
         this.batchRunSelectBtn?.classList.toggle("hidden", !useBatchBar);
         this.runSelectAllWrap?.classList.toggle("hidden", !enabled || useBatchBar);
