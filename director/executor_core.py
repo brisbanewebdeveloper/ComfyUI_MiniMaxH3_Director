@@ -24,6 +24,7 @@ from .audio_export import (
 from .segment_runtime import (
     frames_label,
     resolve_segment_raw_clip,
+    segment_passthrough_audio,
     segment_passthrough_chunk,
     tensor_frame_to_jpeg_b64,
 )
@@ -40,6 +41,10 @@ from .plan import (
     reinforce_v2v_prompt,
 )
 from .progress import report_director_finish, report_director_progress, report_director_segment_preview
+from .reference_semantics import (
+    compile_reference_prompt,
+    reference_semantics_for_segment,
+)
 from .h3_motion_context import (
     DEFAULT_AUDIO_CONTEXT_FRAMES,
     apply_motion_context,
@@ -269,6 +274,14 @@ def execute_director_plan_core(
     # UI toggle on the player bar (timeline.liveTaePreview); default on.
     raw_live = (plan.raw or {}).get("liveTaePreview", (plan.raw or {}).get("live_tae_preview", True))
     live_tae_preview = False if raw_live in (False, 0, "0", "false", "False", "off") else True
+    try:
+        live_preview_frames = max(1, min(12, int((plan.raw or {}).get("livePreviewFrames", 8) or 8)))
+    except (TypeError, ValueError):
+        live_preview_frames = 8
+    try:
+        live_preview_every = max(1, min(10, int((plan.raw or {}).get("livePreviewEvery", 2) or 2)))
+    except (TypeError, ValueError):
+        live_preview_every = 2
 
     all_segments = plan.segments
     # Strictly honor「选择运行」— never force-sample unselected segments.
@@ -480,7 +493,10 @@ def execute_director_plan_core(
             phase="prepare", phase_value=1, phase_max=1, **meta,
         )
 
-        positive_prompt = seg.prompt
+        positive_prompt = compile_reference_prompt(
+            seg.prompt,
+            reference_semantics_for_segment(plan, seg),
+        )
 
         if seg.task_key == "fl2v":
             from .fl2v_timeline import reinforce_fl2v_prompt
@@ -770,17 +786,25 @@ def execute_director_plan_core(
         def _report_step_preview(step: int, total_steps: int, x0) -> None:
             # Live frame for the batch-card preview slot (「生成中…」 area).
             try:
-                from .tae_preview import pil_to_jpeg_b64, x0_to_preview_pil
+                from .tae_preview import pil_to_jpeg_b64, x0_to_preview_frames
 
-                pil = x0_to_preview_pil(x0, max_side=512)
-                if pil is None:
+                preview_frames = x0_to_preview_frames(
+                    x0,
+                    max_side=512,
+                    max_frames=live_preview_frames,
+                )
+                if not preview_frames:
                     return
+                encoded = [pil_to_jpeg_b64(pil, quality=72) for pil in preview_frames]
+                pil = preview_frames[0]
                 report_director_segment_preview(
                     node_id,
                     segment_index=ui_idx,
-                    image_b64=pil_to_jpeg_b64(pil),
+                    image_b64=encoded[0],
                     width=pil.width,
                     height=pil.height,
+                    frames=encoded,
+                    fps=6.0,
                     live=True,
                     step=step + 1,
                     total_steps=total_steps,
@@ -802,7 +826,7 @@ def execute_director_plan_core(
             shift_audio=shift_audio,
             on_phase=_report_sample_phase,
             on_step_preview=_report_step_preview if live_tae_preview else None,
-            preview_every=1,
+            preview_every=live_preview_every,
         )
 
         first_pass_gpu = None
@@ -900,6 +924,7 @@ def execute_director_plan_core(
             shift_audio=shift_audio,
             on_phase=_report_sample_phase,
             on_step_preview=_report_step_preview if live_tae_preview else None,
+            preview_every=live_preview_every,
             first_pass_images=upscale_frames,
             trim_frames=trim_frames,
             on_pass=_export_refine_pass if mp4_run_dir is not None else None,
@@ -1097,6 +1122,9 @@ def execute_director_plan_core(
             continue
         completed_outputs[seg.index] = fill
         completed_pre_refine[seg.index] = fill
+        passthrough_audio = segment_passthrough_audio(plan, seg)
+        if passthrough_audio is not None:
+            completed_audios[seg.index] = passthrough_audio
         passthrough_indices.append(seg.index)
         reports.append(
             f"Segment {seg.index + 1}/{len(all_segments)}: source passthrough "

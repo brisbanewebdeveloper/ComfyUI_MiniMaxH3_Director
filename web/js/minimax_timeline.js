@@ -93,6 +93,10 @@ import {
 } from "./minimax_fl2v.js";
 import { mountPromptImageMentions, refreshPromptTokenEditors, safePreviewImageUrl } from "./minimax_prompt_mentions.js";
 import {
+    openReferenceSemanticsEditor,
+    REFERENCE_SEMANTICS_STYLES,
+} from "./minimax_reference_semantics.js";
+import {
     applyI18nDom,
     aspectDisplayLabel,
     getLocale,
@@ -203,6 +207,10 @@ function sanitizeRefImage(ref) {
         fileName: ref.fileName || "",
         type: ref.type || "input",
         subfolder: ref.subfolder || "",
+        subjectKind: ref.subjectKind || ref.subject_kind || ref.kind || "",
+        description: ref.description || ref.describes || "",
+        retention: ref.retention || "",
+        retained: ref.retained || ref.retentionDescription || "",
     };
 }
 
@@ -216,6 +224,11 @@ function sanitizeRefAudio(ref) {
         type: ref.type || "input",
         subfolder: ref.subfolder || "",
         durationSec: ref.durationSec,
+        subjectKind: ref.subjectKind || ref.subject_kind || ref.kind || "",
+        description: ref.description || ref.describes || "",
+        retention: ref.retention || "",
+        retained: ref.retained || ref.retentionDescription || "",
+        voiceOf: ref.voiceOf || ref.voice_of || "",
     };
 }
 
@@ -233,6 +246,10 @@ function sanitizeRefVideo(ref) {
         previewImageFile: ref.previewImageFile || "",
         previewImageUrl: safePreviewImageUrl(ref.previewImageUrl),
         linked: !!ref.linked || !!(ref.videoFile || ref.previewImageFile || ref.previewImageUrl),
+        subjectKind: ref.subjectKind || ref.subject_kind || ref.kind || "",
+        description: ref.description || ref.describes || "",
+        retention: ref.retention || "",
+        retained: ref.retained || ref.retentionDescription || "",
     };
 }
 
@@ -784,6 +801,7 @@ const STYLES = `
 .bd-lora-actions{display:flex;justify-content:space-between;align-items:center;gap:8px}
 ${IMAGE_BATCH_STYLES}
 ${FL2V_STYLES}
+${REFERENCE_SEMANTICS_STYLES}
 @media(max-width:768px){
 .bd-prompt-layout,.bd-prompt-layout.bd-rv2v-layout,.bd-prompt-layout.bd-v2v-layout,.bd-prompt-layout.bd-v2v-layout.bd-v2v-with-live{grid-template-columns:1fr}
 .bd-prompt-layout.bd-v2v-layout.bd-v2v-with-live>.bd-live-sample{order:3;min-height:160px}
@@ -2424,6 +2442,7 @@ class MiniMaxH3DirectorEditor {
                     <input type="number" class="bd-num" data-r="equal-n" min="2" max="64" value="2" data-i18n-title="tooltip.equalSplitN">
                     <button type="button" class="bd-btn" data-a="equal" data-i18n="toolbar.equalSplit">均分</button>
                     <button type="button" class="bd-btn" data-a="smart-split" data-i18n="toolbar.smartSplit" data-i18n-title="tooltip.smartSplit">智能分割</button>
+                    <button type="button" class="bd-btn" data-a="retake-selected" data-i18n="toolbar.retakeSelected" data-i18n-title="tooltip.retakeSelected">重拍所选</button>
                     <button type="button" class="bd-btn" data-a="run-select-toggle" data-i18n="toolbar.runSelect" data-i18n-title="tooltip.runSelect">选择运行</button>
                     <label class="bd-run-select-all-wrap hidden" data-r="run-select-all-wrap" data-i18n-title="tooltip.runSelectAll">
                         <input type="checkbox" data-r="run-select-all-cb">
@@ -2848,6 +2867,7 @@ class MiniMaxH3DirectorEditor {
         this.runPhaseEl = this.root.querySelector('[data-r="run-phase"]');
         this.runSelectBar = this.root.querySelector('[data-r="run-select-bar"]');
         this.runSelectSummary = this.root.querySelector('[data-r="run-select-summary"]');
+        this.btnRetakeSelected = this.root.querySelector('[data-a="retake-selected"]');
         this.btnRunSelectToggle = this.root.querySelector('[data-a="run-select-toggle"]');
         this.runSelectAllWrap = this.root.querySelector('[data-r="run-select-all-wrap"]');
         this.runSelectAllCb = this.root.querySelector('[data-r="run-select-all-cb"]');
@@ -2885,6 +2905,7 @@ class MiniMaxH3DirectorEditor {
         bind('[data-a="split"]', () => this.splitAtFrame(this.currentFrame));
         bind('[data-a="equal"]', () => this.equalSplit());
         bind('[data-a="smart-split"]', () => { void this.smartSplit(); });
+        bind('[data-a="retake-selected"]', () => this.retakeSelectedSegment());
         bind('[data-a="del-split"]', () => this.deleteSelectedSplitPoint());
         bind('[data-a="run-select-toggle"]', () => this.toggleRunSelectMode());
         bind('[data-a="del"]', () => this.deleteSelectedSegment());
@@ -3404,6 +3425,27 @@ class MiniMaxH3DirectorEditor {
         else this.scheduleRender();
     }
 
+    retakeSelectedSegment() {
+        if (this.getDirectorMode() !== "video") return;
+        const seg = this.timeline.segments?.[this.selectedIndex];
+        if (!seg) return;
+
+        seg.taskType = "fl2v — 首尾帧生视频(First-Last Frame)";
+        this.timeline.editMode = "segment";
+        this.timeline.runSelectEnabled = true;
+        this.timeline.runSelection = [this.selectedIndex];
+        this.timeline.output = {
+            ...(this.timeline.output || {}),
+            exportMode: "all",
+            audioMode: this.timeline.output?.audioMode || "generate",
+        };
+
+        this.root.querySelector('[data-a="mode-global"]')?.classList.remove("active");
+        this.root.querySelector('[data-a="mode-segment"]')?.classList.add("active");
+        this.updateModeUI();
+        this.commit(false, { syncTimeline: true });
+    }
+
     setRunSelectionAll(on) {
         if (!this.isRunSelectEnabled()) return;
         if (this.isFl2vMode()) {
@@ -3430,6 +3472,7 @@ class MiniMaxH3DirectorEditor {
         this.btnRunSelectToggle?.classList.toggle("active", enabled);
         this.btnRunSelectToggle?.classList.toggle("bd-btn-run-select", true);
         this.btnRunSelectToggle?.classList.toggle("hidden", !canRunSelect || useBatchBar);
+        this.btnRetakeSelected?.classList.toggle("hidden", this.getDirectorMode() !== "video");
         this.batchRunSelectBtn?.classList.toggle("active", enabled);
         this.batchRunSelectBtn?.classList.toggle("hidden", !useBatchBar);
         this.runSelectAllWrap?.classList.toggle("hidden", !enabled || useBatchBar);
@@ -8510,6 +8553,20 @@ class MiniMaxH3DirectorEditor {
                 el.appendChild(x);
             }
             this._bindRefSlotDnD(el, target, i, isGlobal);
+            if (ref?.imageFile || ref?.fileName || ref?.imageB64) {
+                el.addEventListener("contextmenu", (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    openReferenceSemanticsEditor({
+                        target,
+                        collection: "refs",
+                        index: i,
+                        media: "image",
+                        label,
+                        onSave: () => { this.commit(); this.renderRefSlots(target.refs, box, isGlobal); },
+                    });
+                });
+            }
             el.onclick = () => {
                 if (this._refDragMoved) {
                     this._refDragMoved = false;
@@ -8670,6 +8727,20 @@ class MiniMaxH3DirectorEditor {
             const label = refAudioLabel(i);
             const ref = (target.refAudios || []).find((r) => Number(r.index ?? r.slot) === i);
             const file = ref?.audioFile || ref?.fileName || "";
+            if (file) {
+                el.addEventListener("contextmenu", (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    openReferenceSemanticsEditor({
+                        target,
+                        collection: "refAudios",
+                        index: i,
+                        media: "audio",
+                        label,
+                        onSave: () => { this.commit(); this.renderRefAudioSlots(); },
+                    });
+                });
+            }
             el.title = file
                 ? t("ref.audioTitleFilled", { label, file })
                 : t("ref.audioTitleEmpty", { label });
@@ -8839,6 +8910,20 @@ class MiniMaxH3DirectorEditor {
             const posterSrc = safePreviewImageUrl(ref?.previewImageUrl)
                 || (ref?.previewImageFile ? refViewUrl(ref.previewImageFile) : "");
             const hasMedia = !!(file || posterSrc || ref?.linked);
+            if (hasMedia) {
+                el.addEventListener("contextmenu", (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    openReferenceSemanticsEditor({
+                        target,
+                        collection: "refVideos",
+                        index: i,
+                        media: "video",
+                        label,
+                        onSave: () => { this.commit(); this.renderR2vCommonVideoSlots(); },
+                    });
+                });
+            }
             const titleFile = file || ref?.fileName || ref?.previewImageFile || "";
             el.title = hasMedia
                 ? t("ref.videoTitleFilled", { label, file: titleFile || label })
@@ -9180,6 +9265,9 @@ class MiniMaxH3DirectorEditor {
     }
 
     clearLiveSamplePreview() {
+        if (this._liveSampleTimer) clearInterval(this._liveSampleTimer);
+        this._liveSampleTimer = null;
+        this._liveSampleFrames = [];
         this._liveSampleB64 = "";
         this._liveSampleStep = null;
         this._liveSampleTotal = null;
@@ -9198,6 +9286,8 @@ class MiniMaxH3DirectorEditor {
         if (!this.needsLiveSamplePanel()) return;
         const b64 = detail.image_b64 || detail.imageB64 || "";
         if (!b64) return;
+        if (this._liveSampleTimer) clearInterval(this._liveSampleTimer);
+        this._liveSampleTimer = null;
         this._placeLiveSamplePanel();
         this.liveSampleEl?.classList.remove("hidden");
         this._liveSampleB64 = b64;
@@ -9205,10 +9295,21 @@ class MiniMaxH3DirectorEditor {
         this._liveSampleTotal = detail.total_steps ?? detail.totalSteps ?? null;
         this._liveSampleSeg = detail.segment_index ?? detail.segmentIndex ?? null;
 
-        const src = b64.startsWith("data:") ? b64 : `data:image/jpeg;base64,${b64}`;
+        const frames = Array.isArray(detail.frames) && detail.frames.length ? detail.frames : [b64];
+        this._liveSampleFrames = frames;
+        const frameSrc = (value) => value.startsWith("data:") ? value : `data:image/jpeg;base64,${value}`;
+        const src = frameSrc(frames[0]);
         if (this.liveSampleImg) {
             this.liveSampleImg.src = src;
             this.liveSampleImg.classList.remove("hidden");
+            if (frames.length > 1) {
+                let index = 0;
+                const interval = Math.max(80, 1000 / Math.max(1, Number(detail.fps) || 6));
+                this._liveSampleTimer = setInterval(() => {
+                    index = (index + 1) % frames.length;
+                    if (this.liveSampleImg) this.liveSampleImg.src = frameSrc(frames[index]);
+                }, interval);
+            }
         }
         this.liveSampleEmpty?.classList.add("hidden");
         this.liveSampleEl?.classList.toggle("receiving", !!detail.live);
@@ -10221,7 +10322,7 @@ app.registerExtension({
                     detail?.segment_index ?? 0,
                     detail?.image_b64 || "",
                     {
-                        frames: detail?.live ? undefined : detail?.frames,
+                        frames: detail?.frames,
                         fps: detail?.fps,
                         live: !!detail?.live,
                         step: detail?.step,

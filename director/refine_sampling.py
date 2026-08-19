@@ -271,6 +271,7 @@ def apply_segment_refine(
     shift_audio: float,
     on_phase: PhaseCallback | None = None,
     on_step_preview: StepPreviewCallback | None = None,
+    preview_every: int = 1,
     first_pass_images: torch.Tensor | None = None,
     trim_frames: int = 0,
     on_pass: RefinePassCallback | None = None,
@@ -405,7 +406,7 @@ def apply_segment_refine(
                 denoise=denoise,
                 on_phase=None,
                 on_step_preview=on_step_preview,
-                preview_every=1,
+                preview_every=preview_every,
                 phase_name="refine",
             )
             last_ok = work

@@ -5,6 +5,12 @@ from __future__ import annotations
 import comfy.samplers
 
 from ..director.executor_core import execute_director_plan_core
+from ..director.model_routing import (
+    FL2VA_FAMILY,
+    REF2VA_FAMILY,
+    model_for_segment,
+    timeline_model_families,
+)
 from .director_common import (
     finalize_director_outputs,
     prepare_director_plan,
@@ -15,6 +21,13 @@ from .director_common import (
 _CATEGORY = "MiniMaxH3"
 
 _DEFAULT_GLOBAL_PROMPT = "A cinematic scene with natural motion and synchronized ambience"
+
+
+class _UnconnectedModel:
+    pass
+
+
+_UNCONNECTED_MODEL = _UnconnectedModel()
 
 
 def director_timeline_required_inputs() -> dict:
@@ -53,7 +66,10 @@ class MiniMaxH3Director:
             "required": {
                 "model": (
                     "MODEL",
-                    {"tooltip": "MiniMax H3 UNET (UNETLoader)."},
+                    {
+                        "lazy": True,
+                        "tooltip": "MiniMax H3 FL2VA UNET for t2v / i2v / fl2v. Also acts as fallback when model_ref2va is unconnected.",
+                    },
                 ),
                 "video_vae": (
                     "VAE",
@@ -70,6 +86,13 @@ class MiniMaxH3Director:
                 **director_timeline_required_inputs(),
             },
             "optional": {
+                "model_ref2va": (
+                    "MODEL",
+                    {
+                        "lazy": True,
+                        "tooltip": "MiniMax H3 REF2VA UNET for r2v / v2v / rv2v. Loaded only when queued segments need it.",
+                    },
+                ),
                 "i2v_groups": (
                     "MMX_DIR_GROUP",
                     {
@@ -145,6 +168,7 @@ class MiniMaxH3Director:
         if input_types is not None:
             expected = {
                 "model": "MODEL",
+                "model_ref2va": "MODEL",
                 "video_vae": "VAE",
                 "audio_vae": "VAE",
                 "clip": "CLIP",
@@ -154,6 +178,26 @@ class MiniMaxH3Director:
                 if got is not None and got != want:
                     return f"{name}: expected {want}, linked node returns {got}."
         return True
+
+    @classmethod
+    def check_lazy_status(
+        cls,
+        timeline_data="",
+        task_type="",
+        model=_UNCONNECTED_MODEL,
+        model_ref2va=_UNCONNECTED_MODEL,
+        **_kwargs,
+    ):
+        families = timeline_model_families(timeline_data, task_type)
+        needed = []
+        if FL2VA_FAMILY in families and model is None:
+            needed.append("model")
+        if REF2VA_FAMILY in families:
+            if model_ref2va is None:
+                needed.append("model_ref2va")
+            elif model_ref2va is _UNCONNECTED_MODEL and model is None and "model" not in needed:
+                needed.append("model")
+        return needed
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT", "INT", "IMAGE", "STRING", "IMAGE")
     RETURN_NAMES = ("images", "audio", "fps", "frame_count", "source_images", "report", "images_pre_refine")
@@ -185,6 +229,7 @@ class MiniMaxH3Director:
         total_frames,
         timeline_data,
         unique_id=None,
+        model_ref2va=None,
         i2v_groups=None,
         r2v_groups=None,
         refine=None,
@@ -201,6 +246,12 @@ class MiniMaxH3Director:
     ):
         segment_model_provider = kwargs.pop("_segment_model_provider", None)
         del kwargs
+
+        def routed_model_provider(_model, segment):
+            candidate = model_for_segment(model, model_ref2va, segment.task_key)
+            if segment_model_provider is not None:
+                return segment_model_provider(candidate, segment)
+            return candidate
 
         plan = prepare_director_plan(
             timeline_data=timeline_data,
@@ -221,7 +272,7 @@ class MiniMaxH3Director:
             execute_director_plan_core(
                 plan,
                 node_id=unique_id,
-                model=model,
+                model=model if model is not None else model_ref2va,
                 vae=video_vae,
                 audio_vae=audio_vae,
                 clip=clip,
@@ -233,7 +284,7 @@ class MiniMaxH3Director:
                 shift_video=shift_video,
                 shift_audio=shift_audio,
                 clear_vram_between_segments=clear_vram_between_segments,
-                segment_model_provider=segment_model_provider,
+                segment_model_provider=routed_model_provider,
             )
         )
 

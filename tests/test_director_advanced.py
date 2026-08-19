@@ -17,6 +17,8 @@ def load_advanced_module():
 
     package = types.ModuleType(package_name)
     package.__path__ = []
+    director_package = types.ModuleType(f"{package_name}.director")
+    director_package.__path__ = []
     nodes_package = types.ModuleType(f"{package_name}.nodes")
     nodes_package.__path__ = []
 
@@ -30,7 +32,7 @@ def load_advanced_module():
             segment_loras = kwargs.pop("test_segment_loras", None)
             if provider is not None and segment_loras is not None:
                 kwargs["segment_models"] = [
-                    provider(kwargs["model"], types.SimpleNamespace(loras=loras))
+                    provider(kwargs["model"], types.SimpleNamespace(loras=loras, task_key="t2v"))
                     for loras in segment_loras
                 ]
             calls.append(("director", kwargs["model"]))
@@ -38,6 +40,13 @@ def load_advanced_module():
 
     director_module = types.ModuleType(f"{package_name}.nodes.director")
     director_module.MiniMaxH3Director = BaseDirector
+
+    model_routing_module = types.ModuleType(f"{package_name}.director.model_routing")
+
+    def model_for_segment(model, model_ref2va, task_key):
+        return model_ref2va if task_key in {"r2v", "v2v", "rv2v"} and model_ref2va is not None else model
+
+    model_routing_module.model_for_segment = model_for_segment
 
     core_nodes = types.ModuleType("nodes")
 
@@ -72,6 +81,8 @@ def load_advanced_module():
     module_name = f"{package_name}.nodes.director_advanced"
     modules = {
         package_name: package,
+        f"{package_name}.director": director_package,
+        f"{package_name}.director.model_routing": model_routing_module,
         f"{package_name}.nodes": nodes_package,
         f"{package_name}.nodes.director": director_module,
         f"{package_name}.nodes.first_block_cache": firstblock_module,

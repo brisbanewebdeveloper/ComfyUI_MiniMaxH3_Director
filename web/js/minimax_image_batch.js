@@ -1814,6 +1814,16 @@ function mountLivePreview(el, seg, badgeText) {
     wrap.appendChild(img);
     wrap.appendChild(badge);
     el.appendChild(wrap);
+    const frames = seg.previewFrames?.length ? seg.previewFrames : [seg.previewB64];
+    if (frames.length > 1) {
+        const state = { playing: true, timer: null, idx: 0 };
+        const interval = Math.max(80, 1000 / Math.max(1, Number(seg.previewFps) || 6));
+        state.timer = setInterval(() => {
+            state.idx = (state.idx + 1) % frames.length;
+            img.src = frameSrc(frames[state.idx]);
+        }, interval);
+        _players.set(el, state);
+    }
 }
 
 function mountVideoPreview(el, seg, running, fps, editor) {
@@ -2256,7 +2266,7 @@ export function setImageBatchPreview(editor, segmentIndex, imageB64, extra = {})
     if (Array.isArray(extra.frames) && extra.frames.length) {
         seg.previewFrames = extra.frames;
         seg.previewFps = extra.fps || seg.previewFps || 24;
-        seg.previewLive = false;
+        seg.previewLive = !!extra.live;
     } else if (imageB64) {
         if (extra.live) {
             // Keep final multi-frame playback until a real final payload arrives.
@@ -2282,7 +2292,7 @@ export function setImageBatchPreview(editor, segmentIndex, imageB64, extra = {})
                 : t("batch.generating");
             let img = preview.querySelector("img.bd-live-preview");
             let badge = preview.querySelector(".bd-batch-live-badge");
-            if (!img) {
+            if (!img || (extra.frames?.length || 0) > 1) {
                 mountLivePreview(preview, seg, badgeText);
             } else {
                 img.src = frameSrc(imageB64);

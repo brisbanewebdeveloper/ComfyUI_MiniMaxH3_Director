@@ -10,6 +10,7 @@ import nodes
 from comfy_extras.nodes_easycache import EasyCacheNode
 
 from .director import MiniMaxH3Director
+from ..director.model_routing import model_for_segment
 from .first_block_cache import apply_first_block_cache
 
 
@@ -173,6 +174,7 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
         video_vae: Any,
         audio_vae: Any,
         clip: Any,
+        model_ref2va: Any = None,
         lora_config: str = "[]",
         enable_sage_attention: bool = False,
         sage_attention: str = "auto",
@@ -209,8 +211,6 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
         )
         if enable_firstblock_cache and enable_easycache:
             raise ValueError("FirstBlockCache and EasyCache cannot both be enabled; choose one cache")
-
-        shared_lora_model = _load_loras(model, lora_config)
 
         def apply_model_patches(candidate: Any) -> Any:
             if enable_sage_attention:
@@ -261,16 +261,33 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
                 )
             return candidate
 
-        shared_model = apply_model_patches(shared_lora_model)
+        lora_models: dict[int, Any] = {}
+        shared_models: dict[int, Any] = {}
+        lora_model_by_shared: dict[int, Any] = {}
 
-        def segment_model_provider(_model: Any, segment: Any) -> Any:
+        def prepare_shared(candidate: Any) -> Any:
+            if candidate is None:
+                return None
+            key = id(candidate)
+            if key not in shared_models:
+                lora_models[key] = _load_loras(candidate, lora_config)
+                shared_models[key] = apply_model_patches(lora_models[key])
+                lora_model_by_shared[id(shared_models[key])] = lora_models[key]
+            return shared_models[key]
+
+        shared_model = prepare_shared(model)
+        shared_ref2va = prepare_shared(model_ref2va)
+
+        def segment_model_provider(candidate: Any, segment: Any) -> Any:
             local_loras = _parse_loras(getattr(segment, "loras", []) or [])
             if not local_loras:
-                return shared_model
-            return apply_model_patches(_load_loras(shared_lora_model, local_loras))
+                return model_for_segment(shared_model, shared_ref2va, segment.task_key)
+            base_lora_model = lora_model_by_shared[id(candidate)]
+            return apply_model_patches(_load_loras(base_lora_model, local_loras))
 
         return super().execute(
             model=shared_model,
+            model_ref2va=shared_ref2va,
             video_vae=video_vae,
             audio_vae=audio_vae,
             clip=clip,

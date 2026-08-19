@@ -139,7 +139,7 @@ def _video_latent_from_x0(x0: Any) -> torch.Tensor | None:
     return None
 
 
-def _latent2rgb_pil(video: torch.Tensor) -> Image.Image | None:
+def _latent2rgb_pil(video: torch.Tensor, temporal_index: int | None = None) -> Image.Image | None:
     try:
         from comfy.latent_formats import MiniMaxH3Video
         import latent_preview
@@ -149,8 +149,7 @@ def _latent2rgb_pil(video: torch.Tensor) -> Image.Image | None:
             fmt.latent_rgb_factors,
             fmt.latent_rgb_factors_bias,
         )
-        # Mid temporal frame for a quick look.
-        t = int(video.shape[2] // 2)
+        t = int(video.shape[2] // 2) if temporal_index is None else int(temporal_index)
         frame = video[:1, :, t]
         out = previewer.decode_latent_to_preview(frame)
         if isinstance(out, Image.Image):
@@ -160,30 +159,8 @@ def _latent2rgb_pil(video: torch.Tensor) -> Image.Image | None:
     return None
 
 
-def x0_to_preview_pil(x0: Any, *, max_side: int = 512) -> Image.Image | None:
-    video = _video_latent_from_x0(x0)
-    if video is None or video.numel() == 0:
-        return None
-
-    pil = None
-    dec = get_tae_decoder()
-    if dec is not None and int(video.shape[1]) == int(dec.latent_channels):
-        try:
-            t = int(video.shape[2] // 2)
-            rgb = dec.decode_frame(video[:1, :, t])
-            arr = (rgb.numpy() * 255.0).clip(0, 255).astype(np.uint8)
-            pil = Image.fromarray(arr, mode="RGB")
-        except Exception as exc:
-            log.warning("TAE decode failed, falling back to Latent2RGB: %s", exc)
-            pil = None
-
-    if pil is None:
-        pil = _latent2rgb_pil(video)
-    if pil is None:
-        return None
-
-    # Latent2RGB frames are often tiny (latent spatial size); upscale so UI
-    # preview slots are not a speck in a large card.
+def _fit_preview_image(pil: Image.Image, max_side: int) -> Image.Image:
+    """Keep tiny latent previews visible while bounding event payload size."""
     min_side = 256
     longest = max(int(pil.width), int(pil.height))
     if longest > 0 and longest < min_side:
@@ -195,6 +172,49 @@ def x0_to_preview_pil(x0: Any, *, max_side: int = 512) -> Image.Image | None:
     if max_side and max_side > 0 and (pil.width > max_side or pil.height > max_side):
         pil = ImageOps.contain(pil, (max_side, max_side), Image.LANCZOS)
     return pil
+
+
+def _temporal_indices(total: int, maximum: int) -> list[int]:
+    count = min(max(1, int(maximum)), max(1, int(total)))
+    if count == 1:
+        return [max(0, int(total) // 2)]
+    last = max(0, int(total) - 1)
+    return list(dict.fromkeys(round(i * last / (count - 1)) for i in range(count)))
+
+
+def x0_to_preview_frames(
+    x0: Any,
+    *,
+    max_side: int = 512,
+    max_frames: int = 8,
+) -> list[Image.Image]:
+    video = _video_latent_from_x0(x0)
+    if video is None or video.numel() == 0:
+        return []
+
+    frames: list[Image.Image] = []
+    dec = get_tae_decoder()
+    use_tae = dec is not None and int(video.shape[1]) == int(dec.latent_channels)
+    for temporal_index in _temporal_indices(int(video.shape[2]), max_frames):
+        pil = None
+        if use_tae:
+            try:
+                rgb = dec.decode_frame(video[:1, :, temporal_index])
+                arr = (rgb.numpy() * 255.0).clip(0, 255).astype(np.uint8)
+                pil = Image.fromarray(arr, mode="RGB")
+            except Exception as exc:
+                log.warning("TAE decode failed, falling back to Latent2RGB: %s", exc)
+                use_tae = False
+        if pil is None:
+            pil = _latent2rgb_pil(video, temporal_index)
+        if pil is not None:
+            frames.append(_fit_preview_image(pil, max_side))
+    return frames
+
+
+def x0_to_preview_pil(x0: Any, *, max_side: int = 512) -> Image.Image | None:
+    frames = x0_to_preview_frames(x0, max_side=max_side, max_frames=1)
+    return frames[0] if frames else None
 
 
 def pil_to_jpeg_b64(pil: Image.Image, *, quality: int = 80) -> str:

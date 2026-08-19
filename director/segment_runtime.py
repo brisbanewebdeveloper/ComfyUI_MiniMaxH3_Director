@@ -8,6 +8,7 @@ import io
 import torch
 from PIL import Image
 
+from ..lib.audio_io import extract_timeline_audio
 from ..lib.image_prep import fit_canvas, fit_video_long_edge
 from ..lib.video_io import load_timeline_segment
 from .frame_align import pad_or_trim_frames
@@ -120,6 +121,21 @@ def segment_passthrough_chunk(plan: DirectorPlan, seg) -> torch.Tensor | None:
         except Exception:
             return None
     return None
+
+
+def segment_passthrough_audio(plan: DirectorPlan, seg) -> dict | None:
+    """Best-effort source audio matching an unselected source-video segment."""
+    if is_gen_timeline_plan(plan) or not needs_source_video(seg.task_key):
+        return None
+    try:
+        return extract_timeline_audio(
+            plan.raw or {},
+            int(seg.start_frame),
+            int(seg.end_frame),
+            float(plan.frame_rate or 24),
+        )
+    except Exception:
+        return None
 
 
 def tensor_frame_to_jpeg_b64(frame: torch.Tensor) -> str:
