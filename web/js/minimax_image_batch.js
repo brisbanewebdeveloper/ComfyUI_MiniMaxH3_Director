@@ -31,6 +31,7 @@ import {
     sumFrameCounts,
 } from "./minimax_gen_timeline.js";
 import { refreshPromptTokenEditors, safePreviewImageUrl, wirePromptImageMentions } from "./minimax_prompt_mentions.js";
+import { openReferenceSemanticsEditor } from "./minimax_reference_semantics.js";
 import { t } from "./minimax_i18n.js";
 
 const _players = new WeakMap();
@@ -1251,6 +1252,25 @@ function createR2vSection(title, countText) {
     return section;
 }
 
+function bindReferenceSemantics(el, editor, target, collection, ref, slot, media, label) {
+    if (!ref) return;
+    el.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openReferenceSemanticsEditor({
+            target,
+            collection,
+            index: slot,
+            media,
+            label,
+            onSave: () => {
+                editor.commit();
+                editor.renderImageBatchGroups();
+            },
+        });
+    });
+}
+
 function renderAudioSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
     const label = refAudioLabel(slot);
     const file = ref?.audioFile || ref?.fileName || "";
@@ -1493,6 +1513,9 @@ function appendR2vMediaSections(card, seg, index, editor) {
             cap.className = "cap";
             cap.textContent = refImageLabel(abs);
             slot.appendChild(cap);
+            bindReferenceSemantics(
+                slot, editor, editor.timeline.global, "refs", ref, abs, "image", refImageLabel(abs),
+            );
             inheritGrid.appendChild(slot);
         }
         inherit.appendChild(inheritGrid);
@@ -1558,6 +1581,7 @@ function appendR2vMediaSections(card, seg, index, editor) {
             slot.dataset.refIndex = String(abs);
             if (local >= visible) slot.classList.add("bd-r2v-pic-hidden");
             renderR2vRefSlot(slot, ref, abs, index, editor);
+            bindReferenceSemantics(slot, editor, seg, "refs", ref, abs, "image", refImageLabel(abs));
             slot.onclick = () => {
                 if (editor._batchRefDragMoved) {
                     editor._batchRefDragMoved = false;
@@ -1615,6 +1639,9 @@ function appendR2vMediaSections(card, seg, index, editor) {
             // Read-only inherit: strip remove control and upload click.
             slot.querySelector(".x")?.remove();
             slot.title = t("batch.r2v.commonInheritTip", { label: refVideoLabel(abs) });
+            bindReferenceSemantics(
+                slot, editor, editor.timeline.global, "refVideos", ref, abs, "video", refVideoLabel(abs),
+            );
             slot.onclick = (e) => {
                 if (e.target.closest?.(".bd-r2v-play, .bd-r2v-dur, video")) return;
                 if (e.target.closest?.(".bd-r2v-thumb")) {
@@ -1647,6 +1674,7 @@ function appendR2vMediaSections(card, seg, index, editor) {
             const ref = (seg.refVideos || []).find((r) => Number(r.index ?? r.slot) === abs);
             const slot = document.createElement("div");
             renderVideoSlot(slot, ref, abs, index, editor, { r2v: true });
+            bindReferenceSemantics(slot, editor, seg, "refVideos", ref, abs, "video", refVideoLabel(abs));
             slot.onclick = (e) => {
                 if (e.target.closest?.(".bd-r2v-play, .bd-r2v-dur, .bd-r2v-progress, .x, video, audio")) return;
                 if (ref && e.target.closest?.(".bd-r2v-thumb")) {
@@ -1681,6 +1709,7 @@ function appendR2vMediaSections(card, seg, index, editor) {
             const ref = (seg.refAudios || []).find((r) => Number(r.index ?? r.slot) === abs);
             const slot = document.createElement("div");
             renderAudioSlot(slot, ref, abs, index, editor, { r2v: true });
+            bindReferenceSemantics(slot, editor, seg, "refAudios", ref, abs, "audio", refAudioLabel(abs));
             slot.onclick = (e) => {
                 if (e.target.closest?.(".bd-r2v-play, .bd-r2v-dur, .bd-r2v-progress, .x, video, audio")) return;
                 if (ref && e.target.closest?.(".bd-r2v-thumb")) {
@@ -2180,6 +2209,7 @@ export function renderImageBatchGroups(editor) {
                 slot.dataset.refKind = "image";
                 slot.dataset.refIndex = String(i);
                 renderRefSlot(slot, ref, i, index, editor);
+                bindReferenceSemantics(slot, editor, seg, "refs", ref, i, "image", refImageLabel(i));
                 slot.onclick = () => {
                     if (editor._batchRefDragMoved) {
                         editor._batchRefDragMoved = false;
