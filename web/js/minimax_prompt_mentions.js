@@ -69,6 +69,11 @@ const MENTION_STYLES = `
 }
 .bd-token-editor:focus{border-color:#4a7a5a;box-shadow:0 0 0 1px rgba(79,255,143,.18)}
 .bd-token-editor:empty:before{content:attr(data-placeholder);color:#666;pointer-events:none}
+.bd-token-actions{display:flex;align-items:center;gap:6px;flex:none;min-height:24px}
+.bd-token-action{border:1px solid #444;border-radius:4px;background:#242424;color:#ddd;padding:3px 8px;font:inherit;font-size:10px;line-height:1.3;cursor:pointer}
+.bd-token-action:hover{background:#303030;color:#fff;border-color:#5a5a5a}
+.bd-token-action:focus-visible{outline:1px solid #4fff8f;outline-offset:1px}
+.bd-token-action-status{min-width:0;color:#e5a0a0;font-size:10px;line-height:1.3}
 .bd-rv2v-layout .bd-token-editor,.bd-v2v-layout .bd-token-editor{
   min-height:220px;background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45
 }
@@ -630,6 +635,15 @@ function writeTextareaValue(textarea, value) {
     }
 }
 
+function selectTokenEditorContents(editor) {
+    editor.focus();
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+}
+
 /**
  * Wire @-mention dropdown + token chip editor on a prompt textarea.
  * Typing `@` lists uploaded reference images / audios / videos; pick one to insert official tags.
@@ -801,6 +815,69 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
         activeIndex = 0;
         renderMenu(match[1]);
     };
+
+    if (textarea.hasAttribute("data-batch-prompt-index")) {
+        const actions = document.createElement("div");
+        actions.className = "bd-token-actions";
+
+        const copy = document.createElement("button");
+        copy.type = "button";
+        copy.className = "bd-token-action";
+        copy.dataset.i18n = "batch.selectCopy";
+        copy.textContent = t("batch.selectCopy");
+
+        const paste = document.createElement("button");
+        paste.type = "button";
+        paste.className = "bd-token-action";
+        paste.dataset.i18n = "batch.selectPaste";
+        paste.textContent = t("batch.selectPaste");
+
+        const status = document.createElement("span");
+        status.className = "bd-token-action-status";
+        status.setAttribute("role", "status");
+        status.setAttribute("aria-live", "polite");
+
+        let statusTimer = null;
+        const showClipboardError = () => {
+            status.textContent = t("batch.clipboardPermission");
+            clearTimeout(statusTimer);
+            statusTimer = setTimeout(() => { status.textContent = ""; }, 7000);
+        };
+
+        copy.addEventListener("click", async () => {
+            closeMenu();
+            selectTokenEditorContents(rich);
+            try {
+                const clipboard = globalThis.navigator?.clipboard;
+                if (!clipboard?.writeText) throw new Error("clipboard unavailable");
+                await clipboard.writeText(serializeTokenEditor(rich));
+                status.textContent = "";
+            } catch {
+                showClipboardError();
+            }
+        });
+
+        paste.addEventListener("click", async () => {
+            closeMenu();
+            try {
+                const clipboard = globalThis.navigator?.clipboard;
+                if (!clipboard?.readText) throw new Error("clipboard unavailable");
+                const text = await clipboard.readText();
+                selectTokenEditorContents(rich);
+                insertAtCaret(rich, text.replace(/\r\n/g, "\n"), getMedia, chipOpts);
+                syncToTextarea({ emitInput: true });
+                status.textContent = "";
+                openIfMention();
+            } catch {
+                // Clipboard reads can be denied by browser permission policy.
+                selectTokenEditorContents(rich);
+                showClipboardError();
+            }
+        });
+
+        actions.append(copy, paste, status);
+        rich.before(actions);
+    }
 
     const scheduleTagRehydrate = () => {
         if (composing) return;
