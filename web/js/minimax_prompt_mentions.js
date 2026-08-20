@@ -313,31 +313,6 @@ export function serializeTokenEditor(editor) {
     return out;
 }
 
-function isInsideEditor(editor, node) {
-    return node === editor || editor?.contains?.(node);
-}
-
-function selectedTokenEditorRange(editor) {
-    const sel = window.getSelection();
-    if (!sel || !sel.rangeCount || !isInsideEditor(editor, sel.anchorNode)
-        || !isInsideEditor(editor, sel.focusNode)) return null;
-    return sel.getRangeAt(0);
-}
-
-function serializeTokenRange(range) {
-    const fragment = range.cloneContents();
-    const wrapper = document.createElement("div");
-    wrapper.appendChild(fragment);
-    return serializeTokenEditor(wrapper);
-}
-
-function isMacPlatform() {
-    const platform = globalThis.navigator?.userAgentData?.platform
-        || globalThis.navigator?.platform
-        || "";
-    return /mac/i.test(platform);
-}
-
 /** Build editor DOM from official prompt string. */
 export function hydrateTokenEditor(editor, text, getMedia, options = {}) {
     if (!editor) return;
@@ -877,53 +852,9 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
         openIfMention();
     });
 
-    for (const type of ["copy", "cut"]) {
-        rich.addEventListener(type, (e) => e.stopPropagation());
-    }
-
-    const emulateMetaShortcuts = !isMacPlatform();
     rich.addEventListener("keydown", (e) => {
-        if (emulateMetaShortcuts && e.metaKey && !e.ctrlKey) {
-            const key = e.key?.toLowerCase?.();
-            if (["a", "v", "c", "x"].includes(key)) {
-                // Chromium on Linux does not map Meta to contenteditable editing
-                // commands, so provide the macOS shortcut semantics explicitly.
-                e.preventDefault();
-                e.stopPropagation();
-                if (key === "a") {
-                    const range = document.createRange();
-                    range.selectNodeContents(rich);
-                    const sel = window.getSelection();
-                    sel.removeAllRanges();
-                    sel.addRange(range);
-                } else if (key === "v") {
-                    const clipboard = globalThis.navigator?.clipboard;
-                    if (clipboard?.readText) {
-                        void clipboard.readText().then((text) => {
-                            insertAtCaret(rich, text.replace(/\r\n/g, "\n"), getMedia, chipOpts);
-                            syncToTextarea({ emitInput: true });
-                            openIfMention();
-                        }).catch(() => {});
-                    }
-                } else {
-                    const range = selectedTokenEditorRange(rich);
-                    const clipboard = globalThis.navigator?.clipboard;
-                    if (range && clipboard?.writeText) {
-                        const text = serializeTokenRange(range);
-                        void clipboard.writeText(text).then(() => {
-                            if (key !== "x") return;
-                            range.deleteContents();
-                            syncToTextarea({ emitInput: true });
-                            openIfMention();
-                        }).catch(() => {});
-                    }
-                }
-                return;
-            }
-        }
-
-        // Keep native editing shortcuts inside the contenteditable prompt surface.
-        if ((e.ctrlKey || e.metaKey) && ["a", "v", "c", "x"].includes(e.key?.toLowerCase?.())) {
+        // contenteditable is not INPUT/TEXTAREA — Comfy treats Ctrl+V as graph paste.
+        if ((e.ctrlKey || e.metaKey) && ["v", "c", "x"].includes(e.key?.toLowerCase?.())) {
             e.stopPropagation();
         }
         if (!menu?.classList.contains("hidden") && filtered.length) {
