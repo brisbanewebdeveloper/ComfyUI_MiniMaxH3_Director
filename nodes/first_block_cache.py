@@ -15,6 +15,7 @@ import comfy.patcher_extension
 
 _CACHE_KEY = "minimax_h3_firstblock_cache"
 _WRAPPER_KEY = "minimax_h3_firstblock_cache"
+_SPECTRUM_WRAPPER_KEY = "spectrum_minimax_h3"
 _MAX_RETAINED_CACHE_BYTES = 768 * 1024**2
 _MIN_DEVICE_HEADROOM_BYTES = 4 * 1024**3
 _DEVICE_HEADROOM_FRACTION = 0.15
@@ -218,6 +219,19 @@ def _sample_wrapper(executor: Any, *args: Any, **kwargs: Any) -> Any:
         guider.model_options = original_options
 
 
+def has_spectrum_wrapper(model: Any) -> bool:
+    """Return whether Spectrum forecasting is installed on this model patcher."""
+    get_wrappers = getattr(model, "get_wrappers", None)
+    if not callable(get_wrappers):
+        return False
+    return bool(
+        get_wrappers(
+            comfy.patcher_extension.WrappersMP.OUTER_SAMPLE,
+            _SPECTRUM_WRAPPER_KEY,
+        )
+    )
+
+
 class _BlockPatch:
     def __init__(
         self,
@@ -265,6 +279,10 @@ def apply_first_block_cache(model: Any, threshold: float = 0.08, verbose: bool =
     blocks = getattr(diffusion_model, "blocks", None)
     if blocks is None or len(blocks) < 2:
         raise ValueError("FirstBlockCache requires the MiniMax H3 DiT block stack")
+    if has_spectrum_wrapper(model):
+        raise ValueError(
+            "Spectrum and FirstBlockCache cannot both be enabled; choose Spectrum or one transformer cache"
+        )
 
     patched = model.clone()
     transformer_options = patched.model_options["transformer_options"]
@@ -292,4 +310,4 @@ def apply_first_block_cache(model: Any, threshold: float = 0.08, verbose: bool =
     return patched
 
 
-__all__ = ["FirstBlockCacheHolder", "apply_first_block_cache"]
+__all__ = ["FirstBlockCacheHolder", "apply_first_block_cache", "has_spectrum_wrapper"]

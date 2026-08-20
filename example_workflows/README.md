@@ -12,6 +12,7 @@
 | `minimax_h3_director_external_groups_i2v.json` | fl2v | fl2va | 外部 Group（Image to Video）→ Combine → Director.`i2v_groups`；时长/素材以接线为准 |
 | `minimax_h3_director_external_groups_r2v.json` | r2v | **ref2va** | 外部 Group（Reference to Video）→ Combine → Director.`r2v_groups`；可用「选择运行」勾选组序 |
 | `minimax_h3_director_refine.json` | r2v | **ref2va** | 外接 **MiniMax H3 Director Refine** → Director.`refine`。`images` 为二采后成片，`images_pre_refine` 为一采对比片 |
+| `minimax_h3_director_spectrum_r2v.json` | r2v | **ref2va** | Spectrum 加速；需另装 **ComfyUI-Spectrum-MiniMax-H3**，不可与 EasyCache / FirstBlockCache 同用 |
 
 ## 模型路径（与官方模板一致）
 
@@ -30,6 +31,16 @@ CLIP Loader 的 **type 必须选 `minimax`**。
 - 画布默认 **0.4MP 16:9（864×480）**，**5 秒 / 124** 帧 @ **24 fps**（17k+5 网格）
 - **25** steps，`res_multistep` + `simple`，CFG **1.0**
 - Sigma shift：video **12** / audio **3**
+
+## Spectrum 加速示例
+
+`minimax_h3_director_spectrum_r2v.json` 需要另装 **ComfyUI-Spectrum-MiniMax-H3**，示例链路为：
+
+```text
+ref2va UNET → Spectrum Apply MiniMax H3 → Director.model
+```
+
+Spectrum 是近似加速器；请用相同 seed 做启用/停用对比。不要同时启用 DirectorAdvanced 的 EasyCache 或 FirstBlockCache。FL2VA 与 REF2VA 同时接入时，两个模型分支都要各接一个 Spectrum 节点。
 
 ## 输出
 

@@ -11,7 +11,7 @@ from comfy_extras.nodes_easycache import EasyCacheNode
 
 from .director import MiniMaxH3Director
 from ..director.model_routing import model_for_segment
-from .first_block_cache import apply_first_block_cache
+from .first_block_cache import apply_first_block_cache, has_spectrum_wrapper
 
 
 SAGE_ATTENTION_MODES = [
@@ -211,6 +211,14 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
         )
         if enable_firstblock_cache and enable_easycache:
             raise ValueError("FirstBlockCache and EasyCache cannot both be enabled; choose one cache")
+
+        if enable_firstblock_cache or enable_easycache:
+            spectrum_models = (model, model_ref2va)
+            if any(candidate is not None and has_spectrum_wrapper(candidate) for candidate in spectrum_models):
+                cache_name = "FirstBlockCache" if enable_firstblock_cache else "EasyCache"
+                raise ValueError(
+                    f"Spectrum and {cache_name} cannot both be enabled; choose Spectrum or one transformer cache"
+                )
 
         def apply_model_patches(candidate: Any) -> Any:
             if enable_sage_attention:

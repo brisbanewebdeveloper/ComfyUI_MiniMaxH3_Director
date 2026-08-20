@@ -88,6 +88,7 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 | `minimax_h3_director_external_groups_i2v.json` | fl2v | fl2va | 外部 Group×2 → Combine → `i2v_groups` |
 | `minimax_h3_director_external_groups_r2v.json` | r2v | **ref2va** | 外部 Group×N → Combine → `r2v_groups` |
 | `minimax_h3_director_refine.json` | r2v | **ref2va** | 外接 Refine 二采；`images` 与 `images_pre_refine` 各出一路成片 |
+| `minimax_h3_director_spectrum_r2v.json` | r2v | **ref2va** | Spectrum 加速；需另装 ComfyUI-Spectrum-MiniMax-H3 |
 
 ### 推荐模型文件
 
@@ -112,6 +113,23 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 - 画布默认 **0.4MP 16:9（864×480）**，**5 秒 / 124** 帧 @ **24 fps**（17k+5 网格）
 - **25** steps，`res_multistep` + `simple`，CFG **1.0**
 - Sigma shift：video **12** / audio **3**
+
+### Spectrum 加速
+
+请单独安装 **ComfyUI-Spectrum-MiniMax-H3**，由 Spectrum 节点管理它自己的加速参数：
+
+```text
+FL2VA Loader → 可选外部 LoRA/模型补丁 → Spectrum Apply MiniMax H3 → Director.model
+REF2VA Loader → 可选外部 LoRA/模型补丁 → Spectrum Apply MiniMax H3 → Director.model_ref2va
+```
+
+队列可能使用哪个模型家族，就要给哪个模型接一个 Spectrum。DirectorAdvanced 的内部 LoRA 和 Director 的 Sigma Shift 会克隆模型；Spectrum 的 clone 回调会为克隆模型创建独立运行状态。
+
+Spectrum 是近似加速器。画质敏感任务请用相同 seed 和参数对比启用/停用结果。导演台默认的 `res_multistep` 受支持；不支持的采样器会回退到原生执行。
+
+不要同时启用 Spectrum 与 DirectorAdvanced 的 **EasyCache** 或 **FirstBlockCache**。这些缓存会绕过 Spectrum 需要观察的 Transformer 计算，因此导演台会在执行前拒绝这种组合。
+
+示例：`example_workflows/minimax_h3_director_spectrum_r2v.json`
 
 ### 首尾帧 fl2v 用法摘要
 

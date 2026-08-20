@@ -63,6 +63,13 @@ class FakeModel:
     def add_wrapper_with_key(self, wrapper_type, key, wrapper):
         self.wrappers.append((wrapper_type, key, wrapper))
 
+    def get_wrappers(self, wrapper_type, key):
+        return [
+            wrapper
+            for current_type, current_key, wrapper in self.wrappers
+            if current_type == wrapper_type and current_key == key
+        ]
+
 
 class FirstBlockCacheTest(unittest.TestCase):
     def setUp(self):
@@ -276,6 +283,14 @@ class FirstBlockCacheTest(unittest.TestCase):
         model = FakeModel()
         model.model_options["transformer_options"]["easycache"] = object()
         with self.assertRaisesRegex(ValueError, "cannot be combined with EasyCache"):
+            self.module.apply_first_block_cache(model)
+
+    def test_install_rejects_spectrum_wrapper(self):
+        model = FakeModel()
+        model.add_wrapper_with_key("outer_sample", "spectrum_minimax_h3", object())
+
+        self.assertTrue(self.module.has_spectrum_wrapper(model))
+        with self.assertRaisesRegex(ValueError, "Spectrum and FirstBlockCache cannot both be enabled"):
             self.module.apply_first_block_cache(model)
 
     def test_threshold_must_be_positive(self):

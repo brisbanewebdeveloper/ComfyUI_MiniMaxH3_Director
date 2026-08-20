@@ -89,6 +89,7 @@ This repo ships examples under `example_workflows/`:
 | `minimax_h3_director_external_groups_i2v.json` | fl2v | fl2va | External Group×2 → Combine → `i2v_groups` |
 | `minimax_h3_director_external_groups_r2v.json` | r2v | **ref2va** | External Group×N → Combine → `r2v_groups` |
 | `minimax_h3_director_refine.json` | r2v | **ref2va** | Refine second sample; `images` and `images_pre_refine` each save a clip |
+| `minimax_h3_director_spectrum_r2v.json` | r2v | **ref2va** | Spectrum acceleration; requires ComfyUI-Spectrum-MiniMax-H3 |
 
 ### Recommended model files
 
@@ -113,6 +114,23 @@ This repo ships examples under `example_workflows/`:
 - Canvas default **0.4MP 16:9 (864×480)**, **5s / 124** frames @ **24 fps** (17k+5 grid)
 - **25** steps, `res_multistep` + `simple`, CFG **1.0**
 - Sigma shift: video **12** / audio **3**
+
+### Spectrum acceleration
+
+Install **ComfyUI-Spectrum-MiniMax-H3** separately, then keep Spectrum as the owner of its acceleration settings:
+
+```text
+FL2VA loader → optional external LoRA/model patches → Spectrum Apply MiniMax H3 → Director.model
+REF2VA loader → optional external LoRA/model patches → Spectrum Apply MiniMax H3 → Director.model_ref2va
+```
+
+Use one Spectrum node for every model family the queued timeline can select. A Spectrum-patched model remains patched when DirectorAdvanced applies its internal LoRAs or when the Director applies Sigma Shift because Spectrum provisions a fresh runtime on model clones.
+
+Spectrum is an approximate accelerator. Compare enabled and disabled runs with the same seed and settings before quality-critical work. Director's default `res_multistep` sampler is supported; an unsupported sampler falls back to native execution.
+
+Do not combine Spectrum with DirectorAdvanced **EasyCache** or **FirstBlockCache**. Both caches can bypass transformer observations required by Spectrum, so Director rejects these combinations before execution.
+
+Example: `example_workflows/minimax_h3_director_spectrum_r2v.json`
 
 ### First/last frame (fl2v) — short guide
 

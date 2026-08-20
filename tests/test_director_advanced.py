@@ -78,6 +78,12 @@ def load_advanced_module():
 
     firstblock_module.apply_first_block_cache = apply_first_block_cache
 
+    def has_spectrum_wrapper(model):
+        get_wrappers = getattr(model, "get_wrappers", None)
+        return callable(get_wrappers) and bool(get_wrappers("outer_sample", "spectrum_minimax_h3"))
+
+    firstblock_module.has_spectrum_wrapper = has_spectrum_wrapper
+
     module_name = f"{package_name}.nodes.director_advanced"
     modules = {
         package_name: package,
@@ -237,6 +243,48 @@ class AdvancedDirectorTest(unittest.TestCase):
                 audio_vae="audio",
                 clip="clip",
                 enable_firstblock_cache=True,
+                enable_easycache=True,
+            )
+
+        self.assertEqual(self.calls, [])
+
+    def test_spectrum_model_rejects_director_caches(self):
+        class SpectrumModel:
+            def get_wrappers(self, wrapper_type, key):
+                if wrapper_type == "outer_sample" and key == "spectrum_minimax_h3":
+                    return [object()]
+                return []
+
+        for cache, expected in (
+            ({"enable_easycache": True}, "Spectrum and EasyCache cannot both be enabled"),
+            ({"enable_firstblock_cache": True}, "Spectrum and FirstBlockCache cannot both be enabled"),
+        ):
+            with self.subTest(cache=next(iter(cache))):
+                with self.assertRaisesRegex(ValueError, expected):
+                    self.module.MiniMaxH3DirectorAdvanced().execute(
+                        model=SpectrumModel(),
+                        video_vae="video",
+                        audio_vae="audio",
+                        clip="clip",
+                        **cache,
+                    )
+
+        self.assertEqual(self.calls, [])
+
+    def test_spectrum_ref2va_model_rejects_director_cache(self):
+        class SpectrumModel:
+            def get_wrappers(self, wrapper_type, key):
+                if wrapper_type == "outer_sample" and key == "spectrum_minimax_h3":
+                    return [object()]
+                return []
+
+        with self.assertRaisesRegex(ValueError, "Spectrum and EasyCache cannot both be enabled"):
+            self.module.MiniMaxH3DirectorAdvanced().execute(
+                model="fl2va",
+                model_ref2va=SpectrumModel(),
+                video_vae="video",
+                audio_vae="audio",
+                clip="clip",
                 enable_easycache=True,
             )
 
