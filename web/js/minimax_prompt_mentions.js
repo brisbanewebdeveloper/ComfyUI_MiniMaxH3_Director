@@ -74,6 +74,22 @@ const MENTION_STYLES = `
 .bd-token-action:hover{background:#303030;color:#fff;border-color:#5a5a5a}
 .bd-token-action:focus-visible{outline:1px solid #4fff8f;outline-offset:1px}
 .bd-token-action-status{min-width:0;color:#e5a0a0;font-size:10px;line-height:1.3}
+.bd-token-resize-handle{
+  position:absolute;left:50%;bottom:0;z-index:4;width:96px;max-width:40%;height:18px;
+  transform:translateX(-50%);display:flex;align-items:flex-end;justify-content:center;
+  padding:0;border:0;background:transparent;outline:none;border-radius:8px 8px 0 0;
+  cursor:ns-resize;touch-action:none;user-select:none
+}
+.bd-token-resize-handle::after{
+  content:"";width:54px;max-width:72%;height:3px;margin-bottom:3px;border-radius:999px;
+  background:#52665a;box-shadow:0 -4px 0 rgba(82,102,90,.65)
+}
+.bd-token-resize-handle:hover::after,
+.bd-token-resize-handle:focus-visible::after,
+.bd-token-wrap.bd-token-resizing .bd-token-resize-handle::after{
+  background:#4fff8f;box-shadow:0 -4px 0 rgba(79,255,143,.45)
+}
+body.bd-token-resizing{cursor:ns-resize!important;user-select:none!important}
 .bd-rv2v-layout .bd-token-editor,.bd-v2v-layout .bd-token-editor{
   min-height:220px;background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45
 }
@@ -91,14 +107,23 @@ const MENTION_STYLES = `
 .bd-token{
   display:inline-flex;align-items:center;gap:4px;max-width:100%;
   margin:0 2px;padding:1px 7px 1px 3px;border-radius:999px;vertical-align:baseline;
-  border:1px solid rgba(79,255,143,.35);background:rgba(79,255,143,.08);color:#d8ffe8;
+  border:1.5px solid #3dcc7a;background:rgba(61,204,122,.12);color:#c8ffd9;
   font-size:11px;font-weight:600;line-height:1.4;user-select:none;cursor:default;white-space:nowrap
 }
 .bd-token[contenteditable="false"]{-webkit-user-modify:read-only}
-.bd-token-image{border-color:rgba(79,255,143,.4);background:rgba(79,255,143,.1)}
-.bd-token-video{border-color:rgba(120,180,255,.4);background:rgba(120,180,255,.1);color:#d0e6ff}
-.bd-token-audio{border-color:rgba(255,200,120,.4);background:rgba(255,200,120,.1);color:#ffe8c8}
-.bd-token.is-missing{opacity:.55;border-style:dashed;filter:grayscale(.35)}
+.bd-token.bd-token-image{
+  border-color:#3dcc7a;background:rgba(61,204,122,.14);color:#c8ffd9;
+  box-shadow:0 0 0 1px rgba(61,204,122,.22)
+}
+.bd-token.bd-token-video{
+  border-color:#4d9fff;background:rgba(77,159,255,.16);color:#d4e9ff;
+  box-shadow:0 0 0 1px rgba(77,159,255,.28)
+}
+.bd-token.bd-token-audio{
+  border-color:#e8a23a;background:rgba(232,162,58,.16);color:#ffe6bf;
+  box-shadow:0 0 0 1px rgba(232,162,58,.28)
+}
+.bd-token.is-missing{opacity:.62;border-style:dashed}
 .bd-token.is-missing .bd-token-label{text-decoration:line-through;text-decoration-color:rgba(255,255,255,.35)}
 .bd-token-thumb{
   width:16px;height:16px;border-radius:3px;object-fit:cover;flex-shrink:0;background:#111;border:1px solid rgba(0,0,0,.35)
@@ -107,6 +132,9 @@ const MENTION_STYLES = `
   width:16px;height:16px;border-radius:3px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;
   font-size:10px;line-height:1;background:rgba(0,0,0,.35);color:inherit
 }
+.bd-token-image .bd-token-glyph{background:rgba(61,204,122,.28);color:#8dffb8}
+.bd-token-video .bd-token-glyph{background:rgba(77,159,255,.32);color:#9cc8ff}
+.bd-token-audio .bd-token-glyph{background:rgba(232,162,58,.32);color:#ffd48a}
 .bd-token-label{max-width:7em;overflow:hidden;text-overflow:ellipsis}
 `;
 
@@ -569,6 +597,98 @@ function positionMenu(menu, editor) {
     menu.style.top = `${Math.round(top)}px`;
 }
 
+/**
+ * Native CSS resize handles are unreliable inside ComfyUI's transformed canvas.
+ * This explicit grip converts viewport pointer movement back into the editor's
+ * unscaled CSS height, so dragging remains accurate at every canvas zoom level.
+ */
+function installTokenResizeHandle(wrap, editor) {
+    if (!wrap || !editor || wrap.querySelector(":scope > .bd-token-resize-handle")) return;
+
+    const handle = document.createElement("button");
+    handle.type = "button";
+    handle.className = "bd-token-resize-handle";
+    handle.dataset.role = "prompt-resize-handle";
+    handle.setAttribute("aria-label", t("tooltip.promptEditorResize"));
+    handle.dataset.i18nTitle = "tooltip.promptEditorResize";
+    handle.title = t("tooltip.promptEditorResize");
+    wrap.appendChild(handle);
+
+    const applyHeight = (height, minHeight = 96) => {
+        const nextHeight = Math.max(minHeight, Math.round(height));
+        editor.style.height = `${nextHeight}px`;
+        wrap.style.height = `${nextHeight}px`;
+    };
+
+    handle.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+        event.preventDefault();
+        event.stopPropagation();
+        const computed = getComputedStyle(editor);
+        const current = Number.parseFloat(computed.height) || editor.offsetHeight || 96;
+        const minHeight = Number.parseFloat(computed.minHeight) || 96;
+        const step = event.shiftKey ? 80 : 24;
+        applyHeight(current + (event.key === "ArrowDown" ? step : -step), minHeight);
+    });
+
+    handle.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+    });
+
+    handle.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+
+        const computed = getComputedStyle(editor);
+        const rect = editor.getBoundingClientRect();
+        const startHeight = Number.parseFloat(computed.height) || editor.offsetHeight || 96;
+        const minHeight = Number.parseFloat(computed.minHeight) || 96;
+        const scaleY = rect.height > 0 ? rect.height / startHeight : 1;
+        const startY = event.clientY;
+        const pointerId = event.pointerId;
+
+        wrap.classList.add("bd-token-resizing");
+        document.body.classList.add("bd-token-resizing");
+        try {
+            handle.setPointerCapture(pointerId);
+        } catch {
+            /* Window listeners below keep dragging active without pointer capture. */
+        }
+
+        const onMove = (moveEvent) => {
+            if (moveEvent.pointerId !== pointerId) return;
+            moveEvent.preventDefault();
+            moveEvent.stopPropagation();
+            applyHeight(
+                startHeight + (moveEvent.clientY - startY) / Math.max(scaleY, 0.01),
+                minHeight
+            );
+        };
+
+        const stop = (endEvent) => {
+            if (endEvent.pointerId !== pointerId) return;
+            endEvent.preventDefault();
+            endEvent.stopPropagation();
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", stop);
+            window.removeEventListener("pointercancel", stop);
+            wrap.classList.remove("bd-token-resizing");
+            document.body.classList.remove("bd-token-resizing");
+            try {
+                handle.releasePointerCapture(pointerId);
+            } catch {
+                /* Ignore when capture already ended. */
+            }
+        };
+
+        window.addEventListener("pointermove", onMove, { passive: false });
+        window.addEventListener("pointerup", stop);
+        window.addEventListener("pointercancel", stop);
+    });
+}
+
 function ensureTokenShell(textarea) {
     if (textarea.dataset.tokenShell === "1" && textarea.__bdTokenEditor) {
         return textarea.__bdTokenEditor;
@@ -596,6 +716,10 @@ function ensureTokenShell(textarea) {
         editor.classList.add(cls);
     }
     wrap.appendChild(editor);
+    // R2V uses the growable card/list layout; other modes keep their existing flex sizing.
+    if (textarea.closest(".bd-batch-r2v")) {
+        installTokenResizeHandle(wrap, editor);
+    }
     textarea.__bdTokenEditor = editor;
     textarea.__bdTokenWrap = wrap;
 
