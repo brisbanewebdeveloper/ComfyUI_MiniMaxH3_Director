@@ -136,8 +136,11 @@ class AdvancedDirectorTest(unittest.TestCase):
         self.assertEqual(optional["enable_firstblock_cache"][1]["default"], False)
         self.assertEqual(optional["firstblock_cache_threshold"][1]["default"], 0.08)
         self.assertEqual(optional["firstblock_cache_verbose"][1]["default"], False)
+        self.assertEqual(optional["enable_cfg_norm"][1]["default"], False)
+        self.assertEqual(optional["cfg_norm_strength"][1]["default"], 0.95)
         names = list(optional)
         self.assertGreater(names.index("enable_firstblock_cache"), names.index("easycache_verbose"))
+        self.assertGreater(names.index("enable_cfg_norm"), names.index("firstblock_cache_verbose"))
 
     def test_disabled_enhancements_pass_the_original_model_to_director(self):
         result = self.module.MiniMaxH3DirectorAdvanced().execute(
@@ -162,6 +165,12 @@ class AdvancedDirectorTest(unittest.TestCase):
                 calls.append(("sage", mode, allow_compile))
                 return (f"{model}>sage",)
 
+        class CFGPatch:
+            @classmethod
+            def execute(cls, model, strength, pre_cfg):
+                calls.append(("cfg_norm", strength, pre_cfg))
+                return FakeNodeOutput(f"{model}>cfg_norm")
+
         class MemoryPatch:
             @classmethod
             def execute(cls, model):
@@ -176,6 +185,7 @@ class AdvancedDirectorTest(unittest.TestCase):
 
         self.core_nodes.NODE_CLASS_MAPPINGS.update(
             {
+                "CFGNorm": CFGPatch,
                 "PathchSageAttentionKJ": SagePatch,
                 "MiniMaxH3MemoryEfficientSageAttentionPatch": MemoryPatch,
                 "SolAttnPatch": SolPatch,
@@ -188,6 +198,8 @@ class AdvancedDirectorTest(unittest.TestCase):
             audio_vae="audio",
             clip="clip",
             lora_config='[{"name":"one.safetensors","strength":0.75},{"name":"two.safetensors","strength":-0.5}]',
+            enable_cfg_norm=True,
+            cfg_norm_strength=0.95,
             enable_sage_attention=True,
             sage_attention="auto",
             allow_sage_compile=True,
@@ -198,10 +210,10 @@ class AdvancedDirectorTest(unittest.TestCase):
             shift_audio=2,
         )
 
-        self.assertTrue(result["model"].endswith(">sage>memory>sol>easycache"))
+        self.assertTrue(result["model"].endswith(">cfg_norm>sage>memory>sol>easycache"))
         self.assertEqual(
             [call[0] for call in self.calls],
-            ["lora", "lora", "sage", "memory", "sol", "easycache", "director"],
+            ["lora", "lora", "cfg_norm", "sage", "memory", "sol", "easycache", "director"],
         )
         self.assertEqual(self.calls[0], ("lora", "one.safetensors", 0.75))
         self.assertEqual(self.calls[1], ("lora", "two.safetensors", -0.5))

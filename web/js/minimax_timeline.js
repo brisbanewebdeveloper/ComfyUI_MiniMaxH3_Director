@@ -436,11 +436,16 @@ const ADVANCED_HIDDEN_WIDGETS = [
     "sol_sink_conditioning", "sol_morton", "sol_morton_curve", "sol_int8_pv",
     "sol_verbose", "sol_use_tma", "sol_tau_profile", "sol_dense_blocks",
     "enable_firstblock_cache", "firstblock_cache_threshold", "firstblock_cache_verbose",
+    "enable_cfg_norm", "cfg_norm_strength", "cfg_norm_pre_cfg",
     "enable_easycache", "easycache_reuse_threshold", "easycache_start_percent",
     "easycache_end_percent", "easycache_verbose",
 ];
 
 const ADVANCED_MODEL_GROUPS = [
+    ["CFGNorm", [
+        ["enable_cfg_norm", "enabled"], ["cfg_norm_strength", "strength"],
+        ["cfg_norm_pre_cfg", "pre_cfg"],
+    ]],
     ["Patch Sage Attention KJ", [
         ["enable_sage_attention", "enabled"], ["sage_attention", "sage_attention"],
         ["allow_sage_compile", "allow_compile"],
@@ -10824,7 +10829,16 @@ function migrateAdvancedWidgetValues(node, config) {
 
     const values = config.widgets_values;
     const widgetCount = node.widgets.length;
+    if (values.length === widgetCount - 6) {
+        values.splice(firstIndex, 0, false, 0.08, false);
+        return true;
+    }
     if (values.length === widgetCount - 3) {
+        const hasFirstBlockCache = typeof values[firstIndex] === "boolean"
+            && typeof values[firstIndex + 1] === "number"
+            && Number.isFinite(values[firstIndex + 1])
+            && typeof values[firstIndex + 2] === "boolean";
+        if (hasFirstBlockCache) return false;
         values.splice(firstIndex, 0, false, 0.08, false);
         return true;
     }

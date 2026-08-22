@@ -263,6 +263,7 @@ def upscale_image_batch(
     height: int,
     upscale_model=None,
     upscale_method: str = "lanczos",
+    strict: bool = True,
     on_phase=None,
 ) -> torch.Tensor:
     width, height = ensure_minimax_canvas(width, height)
@@ -277,6 +278,8 @@ def upscale_image_batch(
                 images, width, height, on_phase=on_phase, pbar=pbar,
             )
         except Exception as exc:
+            if strict:
+                raise RuntimeError("nvidia_rtx_vsr failed") from exc
             log.warning("nvidia_rtx_vsr failed (%s); falling back to interpolate.", exc)
             work = images
     elif upscale_model is not None:
@@ -290,6 +293,8 @@ def upscale_image_batch(
                 pbar=pbar,
             )
         except Exception as exc:
+            if strict:
+                raise RuntimeError("Upscale model failed") from exc
             log.warning("Upscale model failed (%s); falling back to interpolate.", exc)
             work = images
     h, w = int(work.shape[1]), int(work.shape[2])
@@ -333,31 +338,52 @@ def _apply_h3_latent_upscale(
     refine_positive,
     on_phase=None,
 ) -> tuple[dict, Any, list[str]]:
-    from .h3_latent_upscale import upscale_h3_video_latent
-
     src_w, src_h = _source_canvas(plan, first_pass_images)
     if on_phase:
         on_phase("upscale", 0)
     video_latent, audio_latent = _split_av(work)
     model_name = latent_upscale_model_name(pack)
-    latent_mod = pack.get("latent_upscale_module")
     log.info(
         "Director H3 latent upscale: %s %d×%d → %d×%d",
-        model_name or ("(wired)" if latent_mod is not None else "(missing)"),
+        model_name or "(missing)",
         src_w,
         src_h,
         tw,
         th,
     )
-    encoded = upscale_h3_video_latent(
+    if not model_name:
+        raise ValueError("未选择 H3 latent upscaler 3D 权重。")
+    import nodes
+
+    node_class = nodes.NODE_CLASS_MAPPINGS.get("MinimaxH3LatentUpscaler3D")
+    if node_class is None:
+        raise RuntimeError(
+            "h3_latent 需要安装并启用 Comfyui_Minimax_h3_latent_Upscaler，"
+            "然后重启 ComfyUI。"
+        )
+    device = str(pack.get("latent_upscale_device") or "auto")
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("H3 latent upscaler device=cuda，但 CUDA 不可用。")
+    precision = str(pack.get("latent_upscale_precision") or "fp16")
+    output = node_class.execute(
         video_latent,
-        target_width=tw,
-        target_height=th,
-        source_width=src_w,
-        source_height=src_h,
-        model_name=model_name,
-        model=latent_mod,
+        model_name,
+        {"mode": "target dimensions", "width": int(tw), "height": int(th)},
+        32,
+        device,
+        precision,
     )
+    encoded = _unpack(output)[0]
+    if not isinstance(encoded, dict) or not torch.is_tensor(encoded.get("samples")):
+        raise RuntimeError("MinimaxH3LatentUpscaler3D returned an invalid latent.")
+    out_h, out_w = encoded["samples"].shape[-2:]
+    if int(out_w) * 16 != int(tw) or int(out_h) * 16 != int(th):
+        raise RuntimeError(
+            "MinimaxH3LatentUpscaler3D returned "
+            f"{int(out_w) * 16}×{int(out_h) * 16}; expected {int(tw)}×{int(th)}."
+        )
     if isinstance(encoded, dict):
         encoded.pop("noise_mask", None)
     if isinstance(audio_latent, dict):
@@ -382,6 +408,8 @@ def _apply_h3_latent_upscale(
             if pinned:
                 notes.append(f"re-pin {pin_frames}f")
         except Exception as exc:
+            if pack.get("strict", True):
+                raise RuntimeError("H3 latent upscale keyframe re-pin failed") from exc
             log.warning("H3 latent upscale re-pin failed (%s); continuing.", exc)
     if on_phase:
         on_phase("upscale", 1)
@@ -452,7 +480,10 @@ def apply_segment_refine(
     pack = getattr(plan, "refine", None)
     if not isinstance(pack, dict) or not pack.get("enabled"):
         return samples, ""
-    if pack.get("skip_fl2v", True) and getattr(seg, "task_key", "") == "fl2v":
+    skip_fl2v_sample = bool(
+        pack.get("skip_fl2v", False) and getattr(seg, "task_key", "") == "fl2v"
+    )
+    if skip_fl2v_sample and not refine_needs_canvas(pack):
         return samples, "refine skipped (fl2v)"
 
     mode = pack.get("mode") or "refine"
@@ -520,6 +551,7 @@ def apply_segment_refine(
                     height=th,
                     upscale_model=pixel_model,
                     upscale_method=method,
+                    strict=bool(pack.get("strict", True)),
                     on_phase=on_phase,
                 )
                 encoded = _encode_video(vae, frames)
@@ -537,6 +569,8 @@ def apply_segment_refine(
                         if pinned:
                             note_parts.append(f"re-pin {pin_frames}f")
                     except Exception as exc:
+                        if pack.get("strict", True):
+                            raise RuntimeError("Refine upscale keyframe re-pin failed") from exc
                         log.warning(
                             "Segment %s refine upscale re-pin failed (%s); "
                             "second sample continues without a new pin.",
@@ -549,9 +583,11 @@ def apply_segment_refine(
                     on_phase("upscale", 1)
                 last_ok = work
 
-        if mode == "latent_upscale":
+        if mode == "latent_upscale" or skip_fl2v_sample:
             if on_phase:
                 on_phase("refine", 1)
+            if skip_fl2v_sample:
+                note_parts.append("second sample skipped (fl2v)")
             return work, "refine " + ", ".join(note_parts)
 
         wired_sigmas = bool(pack.get("has_sigmas_tensor") or pack.get("sigmas_tensor") is not None)
@@ -619,6 +655,10 @@ def apply_segment_refine(
             on_phase("refine", 1)
         return work, "refine " + ", ".join(note_parts)
     except Exception as exc:
+        if pack.get("strict", True):
+            raise RuntimeError(
+                f"Segment {int(getattr(seg, 'index', 0)) + 1} refine failed: {exc}"
+            ) from exc
         log.warning(
             "Segment %s refine failed (%s); keeping %s.",
             int(getattr(seg, "index", 0)) + 1,

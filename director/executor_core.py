@@ -952,6 +952,19 @@ def execute_director_plan_core(
             export_len=export_len,
             plan=plan,
         )
+        if (
+            isinstance(pack, dict)
+            and refine_needs_canvas(pack)
+            and pack.get("strict", True)
+        ):
+            expected_w = int(pack.get("target_width") or 0)
+            expected_h = int(pack.get("target_height") or 0)
+            actual_h, actual_w = int(decoded.shape[1]), int(decoded.shape[2])
+            if actual_w != expected_w or actual_h != expected_h:
+                raise RuntimeError(
+                    f"Segment {ui_idx + 1} decoded at {actual_w}×{actual_h}; "
+                    f"Refine requested {expected_w}×{expected_h}."
+                )
         report_director_progress(
             node_id, segment_index=progress_index, segment_total=seg_total,
             phase="decode", phase_value=1, phase_max=1, **meta,

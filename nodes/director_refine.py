@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import comfy.samplers
 
-from ..director.h3_latent_upscale import list_h3_latent_upscale_models
+from ..director.latent_upscale_models import list_h3_latent_upscale_models
 from ..director.refine_pack import (
     ASPECT_RATIO_CHOICES,
     DEFAULT_REFINE_SIGMA_SAMPLER,
     DEFAULT_UPSCALE_MEGAPIXELS,
     FOLLOW_DIRECTOR_ASPECT,
+    LATENT_UPSCALE_DEVICES,
+    LATENT_UPSCALE_PRECISIONS,
     MAX_REFINE_PASSES,
     MMX_DIR_REFINE,
     REFINE_MODES,
     SEED_MODES,
+    SIGMA_SPACINGS,
     UPSCALE_METHODS,
     infer_upscale_target,
     pack_refine,
@@ -65,6 +68,7 @@ class MiniMaxH3DirectorRefine:
                     {
                         "tooltip": (
                             "H3 3D latent 放大权重。"
+                            "需要启用 Comfyui_Minimax_h3_latent_Upscaler。"
                             "放到 ComfyUI/models/latent_upscale_models/，"
                             "文件名含 3d（如 minimax_h3_latent_upscaler_3d_*.safetensors）。"
                             "mode=latent_upscale，或 upscale + h3_latent 时使用。"
@@ -111,8 +115,8 @@ class MiniMaxH3DirectorRefine:
                     {
                         "forceInput": True,
                         "tooltip": (
-                            "二采噪声表。接 Comfy 自带 BasicScheduler 或 ManualSigmas。"
-                            "mode=refine / upscale 时必须接线。"
+                            "可选二采噪声表。接 Comfy 自带 BasicScheduler、ManualSigmas"
+                            "或自定义 SIGMAS 时优先使用。未接线则使用下方内置二采设置。"
                             "BasicScheduler 请接和二采相同的 MODEL（导演台主模型或 refine_model）。"
                             "H3 的 SigmaShift 仍由 Refine 内部套上。"
                         ),
@@ -184,12 +188,77 @@ class MiniMaxH3DirectorRefine:
                 "skip_fl2v": (
                     "BOOLEAN",
                     {
-                        "default": True,
+                        "default": False,
                         "tooltip": (
-                            "跳过首尾帧（fl2v）镜头的二采/放大。"
-                            "二采会改画面，容易把钉死的首尾帧画飘；默认跳过以保护关键帧。"
-                            "关掉则 fl2v 也走精修 / latent 放大。"
+                            "首尾帧（fl2v）仍放大到目标分辨率，但跳过二采以保护关键帧。"
+                            "默认关闭：放大后重建关键帧约束并执行二采。"
                         ),
+                    },
+                ),
+                "scale_by": (
+                    "FLOAT",
+                    {
+                        "default": 1.5,
+                        "min": 1.0,
+                        "max": 4.0,
+                        "step": 0.05,
+                        "tooltip": "aspect_ratio=按倍数 时使用；最终宽高仍对齐 ×32。",
+                    },
+                ),
+                "latent_upscale_device": (
+                    list(LATENT_UPSCALE_DEVICES),
+                    {
+                        "default": "auto",
+                        "tooltip": "H3 3D latent upscaler device。auto 优先 CUDA，否则 CPU。",
+                    },
+                ),
+                "latent_upscale_precision": (
+                    list(LATENT_UPSCALE_PRECISIONS),
+                    {
+                        "default": "fp16",
+                        "tooltip": "H3 3D latent upscaler compute precision。fp16 是默认速度/显存平衡。",
+                    },
+                ),
+                "strict": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "放大或二采失败时停止工作流，避免静默输出低分辨率一采结果。",
+                    },
+                ),
+                "second_pass_steps": (
+                    "INT",
+                    {
+                        "default": 2,
+                        "min": 1,
+                        "max": 100,
+                        "tooltip": "未接 SIGMAS 时内置二采步数。multiple_steps_test 使用 2。",
+                    },
+                ),
+                "first_sigma": (
+                    "FLOAT",
+                    {
+                        "default": 0.8,
+                        "min": 0.0,
+                        "max": 20000.0,
+                        "step": 0.01,
+                        "tooltip": "未接 SIGMAS 时的首 sigma（工作流里的 denoise）。",
+                    },
+                ),
+                "sigma_spacing": (
+                    list(SIGMA_SPACINGS),
+                    {
+                        "default": "linear",
+                        "tooltip": "未接 SIGMAS 时中间 sigma 的分布。",
+                    },
+                ),
+                "second_seed": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 0xFFFFFFFFFFFFFFFF,
+                        "tooltip": "seed_mode=fixed 时的二采 seed。",
                     },
                 ),
             },
@@ -209,6 +278,7 @@ class MiniMaxH3DirectorRefine:
         "Director.images is the refined / upscaled result; "
         "Director.images_pre_refine is the first-pass video (before second sample). "
         "Second sample uses SIGMAS from BasicScheduler / ManualSigmas. "
+        "When SIGMAS is unconnected, built-in steps / first sigma / spacing are used. "
         "Upscale / latent_upscale canvas uses the same aspect + megapixels / custom W×H as Director. "
         "Director first-pass stays at its own resolution; Refine target is the enlarge size. "
         "width / height are the resolved target canvas (×32). "
@@ -226,7 +296,15 @@ class MiniMaxH3DirectorRefine:
         megapixels=DEFAULT_UPSCALE_MEGAPIXELS,
         width=1280,
         height=720,
-        skip_fl2v=True,
+        skip_fl2v=False,
+        scale_by=1.5,
+        latent_upscale_device="auto",
+        latent_upscale_precision="fp16",
+        strict=True,
+        second_pass_steps=2,
+        first_sigma=0.8,
+        sigma_spacing="linear",
+        second_seed=0,
         latent_upscale_model=None,
         upscale_model=None,
         h3_latent_model="",
@@ -273,6 +351,14 @@ class MiniMaxH3DirectorRefine:
             target_width=target_width,
             target_height=target_height,
             skip_fl2v=skip_fl2v,
+            scale_by=scale_by,
+            latent_upscale_device=latent_upscale_device,
+            latent_upscale_precision=latent_upscale_precision,
+            strict=strict,
+            second_pass_steps=second_pass_steps,
+            first_sigma=first_sigma,
+            sigma_spacing=sigma_spacing,
+            second_seed=second_seed,
             upscale_method=upscale_method,
             sample_model=refine_model if refine_model is not None else model,
             latent_upscale_model=latent_upscale_model if latent_upscale_model is not None else h3_latent_model,

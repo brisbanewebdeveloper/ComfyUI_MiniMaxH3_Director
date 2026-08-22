@@ -41,7 +41,7 @@
 请将 **ComfyUI** 升级到 **v0.30.0** 及以上（含官方 MiniMax H3 节点：[PR #15224](https://github.com/comfyanonymous/ComfyUI/pull/15224)、[PR #15228](https://github.com/comfyanonymous/ComfyUI/pull/15228)）。
 
 可选：`scenedetect`（智能分割）、`opencv-python-headless`（源视频解码）、`imageio-ffmpeg`（原声抽取）——见 `requirements.txt`。  
-Refine 的 `nvidia_rtx_vsr` 另需 NVIDIA GPU，可 `pip install nvidia-vfx --extra-index-url https://pypi.nvidia.com`（不是硬依赖）。
+Refine 的 `h3_latent` 需要安装并启用 [Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler)。`nvidia_rtx_vsr` 另需 NVIDIA GPU，可 `pip install nvidia-vfx --extra-index-url https://pypi.nvidia.com`（不是硬依赖）。
 
 ## 安装
 
@@ -155,14 +155,15 @@ Spectrum 是近似加速器。画质敏感任务请用相同 seed 和参数对�
 ### 二采 / 放大 Refine 用法摘要
 
 1. 添加 **MiniMax H3 Director Refine**，把 `refine` 接到导演台 `refine` 口。不接则仍是原来的一采
-2. `mode=refine`：同分辨率再采一遍（精修）。`mode=upscale`：先放大到目标画布再二采。`mode=latent_upscale`：只放大 H3 视频 latent，不再二采。分辨率控件在 `upscale` / `latent_upscale` 时显示（可跟随导演台、按比例+百万像素，或自定义宽高）。导演台是一采分辨率，Refine 目标才是放大后的宽高
+2. `mode=refine`：同分辨率再采一遍（精修）。`mode=upscale`：先放大到目标画布再二采。`mode=latent_upscale`：只放大 H3 视频 latent，不再二采。目标可跟随导演台、按倍数、按比例+百万像素，或自定义宽高；最终宽高对齐 ×32
 3. `passes`：精修次数，默认 1、最多 9999。`upscale` 只在第 1 次放大，后面都是同分辨率精修；`latent_upscale` 不二采
 4. 可选接 `refine_model`（二采 UNET）；不接则用导演台主模型。适合一采挂 Turbo LoRA、二采卸掉或换另一套
 5. 导演台 `images` 是二采后成片；`images_pre_refine` 是一采、放大前的画面，便于对比。`source_images` 仍是时间轴原片，不是一采结果
-6. 二采用 SIGMAS：把 `BasicScheduler` 或 `ManualSigmas` 接到 Refine 的 `sigmas` 口
-7. fl2v 默认跳过二采（保护钉死的首尾帧）；关掉 Refine 上的 `skip_fl2v` 才会采
-8. `upscale` 默认 `h3_latent`：在 Refine 节点里选 3D 权重（`upscale_method` 下方下拉框；`mode=latent_upscale` 时同样出现）。权重放 `ComfyUI/models/latent_upscale_models/`。`lanczos` 可另接 `upscale_model`（RealESRGAN 等），不接则纯插值；也可改 `nvidia_rtx_vsr`
-9. 「分段导出」且 `passes>1` 时，每轮会另落 `seg_XXXX_pN.mp4`；「全部导出」只出一采和终稿
+6. 未接 `sigmas` 时使用内置 `second_pass_steps=2`、`first_sigma=0.8`、`linear`；接入 `BasicScheduler`、`ManualSigmas` 或自定义 SIGMAS 时以接线为准
+7. `seed_mode=fixed` 可给二采独立 seed。`skip_fl2v` 只跳过 fl2v 二采，仍将镜头放大到统一终稿分辨率
+8. `upscale` 默认 `h3_latent`：选择 3D 权重、device 和 precision；外部 upscaler 会做长视频 temporal chunking。权重放 `ComfyUI/models/latent_upscale_models/`
+9. `strict` 默认开启：放大、二采或终稿尺寸不正确时停止工作流，不静默退回低分辨率一采结果
+10. Advanced 可启用 `CFGNorm`，`0.95` 对齐 `multiple_steps_test`；「分段导出」且 `passes>1` 时，每轮会另落 `seg_XXXX_pN.mp4`
 
 示例：`example_workflows/minimax_h3_director_二采_加速.json`
 
@@ -209,7 +210,7 @@ Spectrum 是近似加速器。画质敏感任务请用相同 seed 和参数对�
 - [MiniMax-AI](https://github.com/MiniMax-AI) — MiniMax H3 模型
 - [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) — 权重与文档
 - [NikoDemon80/ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) — 段间运动/音频续拍思路参考
-- [LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler) — H3 3D latent 放大架构与权重格式参考
+- [LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler) — Refine `h3_latent` 外部执行后端
 
 ## 许可证
 

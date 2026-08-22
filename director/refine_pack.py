@@ -14,8 +14,11 @@ from ..lib.image_prep import MINIMAX_CANVAS_STRIDE, ensure_minimax_canvas
 MMX_DIR_REFINE = "MMX_DIR_REFINE"
 
 REFINE_MODES = ("refine", "upscale", "latent_upscale")
-SEED_MODES = ("inherit", "offset")
+SEED_MODES = ("inherit", "offset", "fixed")
 UPSCALE_METHODS = ("lanczos", "nvidia_rtx_vsr", "h3_latent")
+LATENT_UPSCALE_DEVICES = ("auto", "cuda", "cpu")
+LATENT_UPSCALE_PRECISIONS = ("fp16", "fp32", "bf16")
+SIGMA_SPACINGS = ("linear", "cosine", "sine")
 MAX_REFINE_PASSES = 9999
 # 海螺参考生视频二采：ManualSigmas 4 个数 = euler 3 步。
 HAILUO_REFINE_SIGMAS = (0.85, 0.7250, 0.4219, 0.0)
@@ -64,14 +67,34 @@ def is_refine_sigmas_tensor(raw: Any) -> bool:
 
 
 def refine_sigmas_override(pack: dict[str, Any] | None):
-    """Wired BasicScheduler / ManualSigmas tensor. No text fallback."""
+    """Return wired SIGMAS, otherwise the generated second-pass schedule."""
     pack = pack or {}
     tensor = pack.get("sigmas_tensor")
     if tensor is None and is_refine_sigmas_tensor(pack.get("sigmas")):
         tensor = pack.get("sigmas")
-    if tensor is None:
-        return None
-    return parse_refine_sigmas(tensor, fallback=False)
+    if tensor is not None:
+        return parse_refine_sigmas(tensor, fallback=False)
+    parsed = pack.get("sigmas_parsed") or ()
+    return parse_refine_sigmas(parsed, fallback=False) if parsed else None
+
+
+def generated_refine_sigmas(steps: int, first_sigma: float, spacing: str) -> tuple[float, ...]:
+    """Build the SetFirstSigma + ExtendIntermediateSigmas schedule used by the example."""
+    steps = max(1, min(100, int(steps or 1)))
+    first = max(0.0, min(20000.0, float(first_sigma)))
+    spacing = str(spacing or "linear").strip().lower()
+    if spacing not in SIGMA_SPACINGS:
+        spacing = "linear"
+    values = [first]
+    for index in range(1, steps):
+        x = index / steps
+        if spacing == "cosine":
+            x = math.sin(x * math.pi / 2)
+        elif spacing == "sine":
+            x = 1 - math.cos(x * math.pi / 2)
+        values.append(first * (1 - x))
+    values.append(0.0)
+    return tuple(values)
 
 
 def resolve_latent_upscale_ref(raw: Any) -> tuple[Any, str]:
@@ -119,6 +142,7 @@ def latent_upscale_model_name(pack: dict[str, Any] | None) -> str:
 
 
 FOLLOW_DIRECTOR_ASPECT = "跟随导演台"
+SCALE_BY_ASPECT = "按倍数"
 CUSTOM_ASPECT_RATIO = "自定义"
 DEFAULT_UPSCALE_MEGAPIXELS = 1.0
 
@@ -136,6 +160,7 @@ RESOLUTION_ASPECTS = (
 
 ASPECT_RATIO_CHOICES = (
     FOLLOW_DIRECTOR_ASPECT,
+    SCALE_BY_ASPECT,
     *[row[0] for row in RESOLUTION_ASPECTS],
     CUSTOM_ASPECT_RATIO,
 )
@@ -143,6 +168,8 @@ ASPECT_RATIO_CHOICES = (
 _ASPECT_ALIASES = {
     "Follow Director": FOLLOW_DIRECTOR_ASPECT,
     "follow": FOLLOW_DIRECTOR_ASPECT,
+    "Scale by multiplier": SCALE_BY_ASPECT,
+    "scale_by": SCALE_BY_ASPECT,
     "Custom": CUSTOM_ASPECT_RATIO,
     "自定义 (Custom)": CUSTOM_ASPECT_RATIO,
     "1:1 (Square)": "1:1 (方形)",
@@ -198,6 +225,10 @@ def is_custom_aspect_ratio(aspect_ratio: str | None) -> bool:
     return normalize_aspect_ratio(aspect_ratio) == CUSTOM_ASPECT_RATIO
 
 
+def is_scale_by_aspect(aspect_ratio: str | None) -> bool:
+    return normalize_aspect_ratio(aspect_ratio) == SCALE_BY_ASPECT
+
+
 def resolution_from_selector(
     aspect_ratio: str,
     megapixels: float,
@@ -205,7 +236,7 @@ def resolution_from_selector(
 ) -> tuple[int, int] | None:
     """Director ResolutionSelector math: aspect + MP → W×H snapped to ×32."""
     ar = normalize_aspect_ratio(aspect_ratio)
-    if ar in {FOLLOW_DIRECTOR_ASPECT, CUSTOM_ASPECT_RATIO}:
+    if ar in {FOLLOW_DIRECTOR_ASPECT, SCALE_BY_ASPECT, CUSTOM_ASPECT_RATIO}:
         return None
     row = next((r for r in RESOLUTION_ASPECTS if r[0] == ar), None)
     if row is None:
@@ -262,6 +293,14 @@ def pack_refine(
     target_width: int = 0,
     target_height: int = 0,
     skip_fl2v: bool = True,
+    scale_by: float = 1.5,
+    latent_upscale_device: str = "auto",
+    latent_upscale_precision: str = "fp16",
+    strict: bool = True,
+    second_pass_steps: int = 2,
+    first_sigma: float = 0.8,
+    sigma_spacing: str = "linear",
+    second_seed: int = 0,
     upscale_method: str = "h3_latent",
     sample_model=None,
     latent_upscale_model=None,
@@ -280,9 +319,12 @@ def pack_refine(
         method = "h3_latent"
     sampler = str(sampler or DEFAULT_REFINE_SIGMA_SAMPLER).strip() or DEFAULT_REFINE_SIGMA_SAMPLER
     sigma_tensor = sigmas if is_refine_sigmas_tensor(sigmas) else None
-    parsed = (
-        parse_refine_sigmas(sigma_tensor, fallback=False) if sigma_tensor is not None else ()
-    )
+    sigma_spacing = str(sigma_spacing or "linear").strip().lower()
+    if sigma_spacing not in SIGMA_SPACINGS:
+        sigma_spacing = "linear"
+    parsed = parse_refine_sigmas(sigma_tensor, fallback=False) if sigma_tensor is not None else ()
+    if sigma_tensor is None and mode != "latent_upscale":
+        parsed = generated_refine_sigmas(second_pass_steps, first_sigma, sigma_spacing)
     ar = normalize_aspect_ratio(aspect_ratio)
     tw, th = resolve_refine_target(
         aspect_ratio=ar,
@@ -293,6 +335,12 @@ def pack_refine(
         target_height=target_height,
     )
     latent_mod, latent_name = resolve_latent_upscale_ref(latent_upscale_model)
+    device = str(latent_upscale_device or "auto").strip().lower()
+    if device not in LATENT_UPSCALE_DEVICES:
+        device = "auto"
+    precision = str(latent_upscale_precision or "fp16").strip().lower()
+    if precision not in LATENT_UPSCALE_PRECISIONS:
+        precision = "fp16"
     return {
         "enabled": True,
         "mode": mode,
@@ -303,6 +351,14 @@ def pack_refine(
         "target_width": tw,
         "target_height": th,
         "skip_fl2v": bool(skip_fl2v),
+        "scale_by": max(1.0, min(4.0, float(scale_by or 1.5))),
+        "latent_upscale_device": device,
+        "latent_upscale_precision": precision,
+        "strict": bool(strict),
+        "second_pass_steps": max(1, min(100, int(second_pass_steps or 1))),
+        "first_sigma": max(0.0, min(20000.0, float(first_sigma))),
+        "sigma_spacing": sigma_spacing,
+        "second_seed": max(0, int(second_seed or 0)),
         "upscale_method": method,
         "upscale_model": upscale_model,
         "has_upscale_model": upscale_model is not None,
@@ -340,7 +396,13 @@ def normalize_refine_pack(
     ar = normalize_aspect_ratio(raw.get("aspect_ratio"))
     tw, th = int(raw.get("target_width") or 0), int(raw.get("target_height") or 0)
     if mode in {"upscale", "latent_upscale"} and (tw <= 0 or th <= 0):
-        if not is_follow_director_aspect(ar) and not is_custom_aspect_ratio(ar):
+        if is_scale_by_aspect(ar):
+            factor = max(1.0, min(4.0, float(raw.get("scale_by") or 1.5)))
+            tw, th = ensure_minimax_canvas(
+                max(32, round(base_width * factor)),
+                max(32, round(base_height * factor)),
+            )
+        elif not is_follow_director_aspect(ar) and not is_custom_aspect_ratio(ar):
             resolved = resolution_from_selector(ar, raw.get("megapixels") or DEFAULT_UPSCALE_MEGAPIXELS)
             if resolved:
                 tw, th = resolved
@@ -364,8 +426,12 @@ def normalize_refine_pack(
         parsed = parse_refine_sigmas(sigma_tensor, fallback=False)
     elif parsed:
         parsed = parse_refine_sigmas(parsed, fallback=False)
-    else:
-        parsed = ()
+    elif mode != "latent_upscale":
+        parsed = generated_refine_sigmas(
+            raw.get("second_pass_steps") or 2,
+            raw.get("first_sigma") if raw.get("first_sigma") is not None else 0.8,
+            raw.get("sigma_spacing") or "linear",
+        )
     sample_model = raw.get("sample_model")
     if sample_model is None:
         sample_model = raw.get("model")
@@ -376,6 +442,18 @@ def normalize_refine_pack(
     if not latent_name:
         latent_name = str(raw.get("h3_latent_model") or "").strip()
     upscale = raw.get("upscale_model")
+    device = str(raw.get("latent_upscale_device") or "auto").strip().lower()
+    if device not in LATENT_UPSCALE_DEVICES:
+        device = "auto"
+    precision = str(raw.get("latent_upscale_precision") or "fp16").strip().lower()
+    if precision not in LATENT_UPSCALE_PRECISIONS:
+        precision = "fp16"
+    sigma_spacing = str(raw.get("sigma_spacing") or "linear").strip().lower()
+    if sigma_spacing not in SIGMA_SPACINGS:
+        sigma_spacing = "linear"
+    first_sigma = raw.get("first_sigma")
+    if first_sigma is None:
+        first_sigma = 0.8
     return {
         "enabled": True,
         "mode": mode,
@@ -386,6 +464,14 @@ def normalize_refine_pack(
         "target_width": tw,
         "target_height": th,
         "skip_fl2v": bool(raw.get("skip_fl2v", True)),
+        "scale_by": max(1.0, min(4.0, float(raw.get("scale_by") or 1.5))),
+        "latent_upscale_device": device,
+        "latent_upscale_precision": precision,
+        "strict": bool(raw.get("strict", True)),
+        "second_pass_steps": max(1, min(100, int(raw.get("second_pass_steps") or 2))),
+        "first_sigma": max(0.0, min(20000.0, float(first_sigma))),
+        "sigma_spacing": sigma_spacing,
+        "second_seed": max(0, int(raw.get("second_seed") or 0)),
         "upscale_method": method,
         "upscale_model": upscale,
         "has_upscale_model": upscale is not None,
@@ -405,11 +491,9 @@ def normalize_refine_pack(
 
 
 def refine_will_sample(plan, seg) -> bool:
-    """True when this segment will run a second sample / upscale pass."""
+    """True when this segment will run refine and/or upscale processing."""
     pack = getattr(plan, "refine", None)
     if not isinstance(pack, dict) or not pack.get("enabled"):
-        return False
-    if pack.get("skip_fl2v", True) and getattr(seg, "task_key", "") == "fl2v":
         return False
     return True
 
@@ -431,6 +515,8 @@ def refine_model_for(pack: dict[str, Any] | None, fallback):
 
 
 def refine_seed_for(pack: dict[str, Any], seed: int, pass_index: int = 0) -> int:
+    if pack.get("seed_mode") == "fixed":
+        return int(pack.get("second_seed") or 0)
     if pack.get("seed_mode") == "offset":
         return int(seed) + 1 + int(max(0, pass_index))
     return int(seed)
@@ -448,6 +534,7 @@ def refine_fingerprint(plan) -> dict[str, Any]:
         "refine_target": f"{int(pack.get('target_width') or 0)}x{int(pack.get('target_height') or 0)}",
         "refine_aspect": pack.get("aspect_ratio") or FOLLOW_DIRECTOR_ASPECT,
         "refine_megapixels": round(float(pack.get("megapixels") or 0), 3),
+        "refine_scale_by": round(float(pack.get("scale_by") or 0), 3),
         "refine_upscale_method": pack.get("upscale_method") or "h3_latent",
         "refine_upscale_model": bool(pack.get("has_upscale_model") or pack.get("upscale_model") is not None),
         "refine_latent_upscale_model": latent_upscale_model_name(pack),
@@ -456,6 +543,10 @@ def refine_fingerprint(plan) -> dict[str, Any]:
         if pack.get("has_sigmas_tensor") or pack.get("sigmas_tensor") is not None
         else (pack.get("sigmas") or ""),
         "refine_sigmas_wired": bool(pack.get("has_sigmas_tensor") or pack.get("sigmas_tensor") is not None),
+        "refine_upscale_device": pack.get("latent_upscale_device") or "auto",
+        "refine_upscale_precision": pack.get("latent_upscale_precision") or "fp16",
+        "refine_strict": bool(pack.get("strict", True)),
+        "refine_second_seed": int(pack.get("second_seed") or 0),
         "refine_sample_model": bool(pack.get("has_sample_model") or pack.get("sample_model") is not None),
         "refine_skip_fl2v": bool(pack.get("skip_fl2v", True)),
     }
@@ -494,7 +585,7 @@ def refine_report_line(plan) -> str | None:
     n_steps = max(1, len(parsed) - 1) if parsed else 0
     if mode == "latent_upscale":
         return f"Refine: ON ({mode}{model_note}{extra})"
-    how = f"sigmas {sampler}" if wired else "sigmas 未接线"
+    how = f"sigmas {sampler}" if wired else f"generated sigmas {sampler}"
     step_note = f" {n_steps}-step" if n_steps else ""
     return (
         f"Refine: ON ({mode}, {how}{step_note}"

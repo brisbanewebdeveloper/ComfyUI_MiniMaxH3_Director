@@ -50,11 +50,11 @@ Refine 示例另把 `images_pre_refine` 接到第二路 `CreateVideo` / `SaveVid
 
 ## Refine 二采
 
-- 二采一律按 SIGMAS：把 `BasicScheduler` 或 `ManualSigmas` 接到 Refine 的 `sigmas` 口。`BasicScheduler` 请接和二采相同的 MODEL
+- 未接 SIGMAS 时默认使用 `2 steps / first sigma 0.8 / linear`；接 `BasicScheduler`、`ManualSigmas` 或自定义 SIGMAS 时以接线为准
 - 不接 Refine 节点 = 原来的单次采样
 - `mode=refine`：同分辨率精修；`mode=upscale`：放大到目标画布再二采；`mode=latent_upscale`：只放大 H3 latent
-- 导演台分辨率是一采；Refine 画布（比例+百万像素 / 自定义）是放大目标
+- 导演台分辨率是一采；Refine 画布支持按倍数、比例+百万像素或自定义宽高，终稿对齐 ×32
 - `passes`：精修次数（默认 1）；`upscale` 只在第 1 次放大；`latent_upscale` 不二采
 - 可选接 `refine_model`（二采 UNET）；不接则用导演台主模型
-- `upscale` 默认 `h3_latent`：在 Refine 节点 `upscale_method` 下方下拉选 3D 权重（`mode=latent_upscale` 时同样出现）。权重放 `ComfyUI/models/latent_upscale_models/`。`lanczos` 可另接 `upscale_model`（RealESRGAN 等），不接则纯插值；也可改 `nvidia_rtx_vsr`
-- fl2v 默认跳过二采；关掉 `skip_fl2v` 才会采首尾帧镜头
+- `upscale` 默认 `h3_latent`，需要启用 `Comfyui_Minimax_h3_latent_Upscaler`；可选 3D 权重、device 和 precision
+- `strict` 默认开启；`skip_fl2v` 只跳过二采，仍输出统一终稿分辨率

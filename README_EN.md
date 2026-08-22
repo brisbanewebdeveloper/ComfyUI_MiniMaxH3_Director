@@ -42,7 +42,7 @@ Repository: [AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/Comf
 **ComfyUI ≥ v0.30.0** with official MiniMax H3 nodes ([PR #15224](https://github.com/comfyanonymous/ComfyUI/pull/15224), [PR #15228](https://github.com/comfyanonymous/ComfyUI/pull/15228)).
 
 Optional: `scenedetect`, `opencv-python-headless`, `imageio-ffmpeg` — see `requirements.txt`.  
-Refine `nvidia_rtx_vsr` needs an NVIDIA GPU: `pip install nvidia-vfx --extra-index-url https://pypi.nvidia.com` (not a hard dependency).
+Refine `h3_latent` requires the enabled [Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler). `nvidia_rtx_vsr` needs an NVIDIA GPU: `pip install nvidia-vfx --extra-index-url https://pypi.nvidia.com` (not a hard dependency).
 
 ## Installation
 
@@ -156,14 +156,15 @@ Example: `example_workflows/minimax_h3_director_spectrum_r2v.json`
 ### Refine / upscale — short guide
 
 1. Add **MiniMax H3 Director Refine** and wire `refine` into Director `refine`. Leave it unconnected for the original single pass
-2. `mode=refine`: same-resolution second sample. `mode=upscale`: enlarge to a target canvas then second-sample. `mode=latent_upscale`: enlarge H3 video latent only (no second sample). Resolution widgets appear for `upscale` / `latent_upscale` (follow Director, aspect + megapixels, or custom W×H). Director canvas is the first-pass size; Refine target is the enlarge size
+2. `mode=refine`: same-resolution second sample. `mode=upscale`: enlarge to a target canvas then second-sample. `mode=latent_upscale`: enlarge H3 video latent only. Target size can follow Director, use a multiplier, aspect + megapixels, or custom W×H; final dimensions are aligned to ×32
 3. `passes`: refine rounds, default 1, max 9999. In `upscale` mode only the first round enlarges; later rounds stay on that canvas. `latent_upscale` does not sample
 4. Optional `refine_model` (second-pass UNET); unwired uses the Director model. Typical: Turbo LoRA on pass 1, a clean / other LoRA UNET on refine
 5. Director `images` is the refined clip; `images_pre_refine` is the first pass before upscale (for A/B). `source_images` is still the timeline source, not the first-pass generate
-6. Second sample uses SIGMAS: wire `BasicScheduler` or `ManualSigmas` into Refine `sigmas`
-7. fl2v skips refine by default (protects pinned first/last frames); turn off `skip_fl2v` on Refine to include those shots
-8. Upscale default is `h3_latent`: pick the 3D weights in Refine (dropdown under `upscale_method`; also shown for `mode=latent_upscale`). Put the file in `ComfyUI/models/latent_upscale_models/`. `lanczos` can take optional `upscale_model` (RealESRGAN etc.); or use `nvidia_rtx_vsr`
-9. Segment export with `passes>1` also writes `seg_XXXX_pN.mp4` per round; export-all still only keeps first-pass and the final clip
+6. With `sigmas` unconnected, Refine uses built-in `second_pass_steps=2`, `first_sigma=0.8`, and `linear` spacing. A wired `BasicScheduler`, `ManualSigmas`, or custom SIGMAS overrides them
+7. `seed_mode=fixed` gives the second pass an independent seed. `skip_fl2v` skips only FL2V denoising; the shot is still enlarged to the common final canvas
+8. `h3_latent` exposes 3D weights, device, and precision; the external upscaler supplies long-video temporal chunking. Put weights in `ComfyUI/models/latent_upscale_models/`
+9. `strict` defaults on: upscale, second-pass, or final-size failure stops the workflow instead of silently returning the low-resolution first pass
+10. Advanced can enable `CFGNorm`; `0.95` matches `multiple_steps_test`. Segment export with `passes>1` also writes each intermediate pass
 
 Example: `example_workflows/minimax_h3_director_二采_加速.json`
 
@@ -210,7 +211,7 @@ Mirror the two official conditioning nodes and feed **multi-group** batches into
 - [MiniMax-AI](https://github.com/MiniMax-AI) — MiniMax H3 model
 - [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) — weights & docs
 - [NikoDemon80/ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) — inspiration for cross-segment motion/audio continuation
-- [LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler) — H3 3D latent upscaler architecture and checkpoint format
+- [LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler) — external backend for Refine `h3_latent`
 
 ## License
 

@@ -9,6 +9,7 @@ import {
 
 const REFINE_CLASS = "MiniMaxH3DirectorRefine";
 const FOLLOW_DIRECTOR_ASPECT = "跟随导演台";
+const SCALE_BY_ASPECT = "按倍数";
 
 function isRefineNode(node) {
     const cls = node?.comfyClass || node?.type || "";
@@ -60,6 +61,8 @@ function isCustomAspect(value) {
 const ASPECT_CHOICES = new Set([
     FOLLOW_DIRECTOR_ASPECT,
     "Follow Director",
+    SCALE_BY_ASPECT,
+    "Scale by multiplier",
     CUSTOM_ASPECT_RATIO,
     "Custom",
     "1:1 (方形)",
@@ -124,10 +127,18 @@ function orderRefineWidgets(node) {
         "passes",
         "seed_mode",
         "aspect_ratio",
+        "scale_by",
         "megapixels",
         "width",
         "height",
         "skip_fl2v",
+        "latent_upscale_device",
+        "latent_upscale_precision",
+        "strict",
+        "second_pass_steps",
+        "first_sigma",
+        "sigma_spacing",
+        "second_seed",
     ];
     const byName = new Map(widgets.map((w) => [w.name, w]));
     const ordered = [];
@@ -182,6 +193,11 @@ function isFollowAspect(value) {
     return !v || v === FOLLOW_DIRECTOR_ASPECT || v === "Follow Director";
 }
 
+function isScaleByAspect(value) {
+    const v = String(value ?? "").trim();
+    return v === SCALE_BY_ASPECT || v === "Scale by multiplier";
+}
+
 function readMode(node) {
     const named = widgetByName(node, "mode");
     const raw = String(widgetValue(named) ?? "").toLowerCase();
@@ -202,7 +218,7 @@ function syncRefineComputedSize(node) {
     const mpW = widgetByName(node, "megapixels");
     const widthW = widgetByName(node, "width");
     const heightW = widgetByName(node, "height");
-    if (!aspectW || isFollowAspect(widgetValue(aspectW)) || isCustomAspect(widgetValue(aspectW))) return;
+    if (!aspectW || isFollowAspect(widgetValue(aspectW)) || isScaleByAspect(widgetValue(aspectW)) || isCustomAspect(widgetValue(aspectW))) return;
     const resolved = resolutionFromSelector(widgetValue(aspectW), widgetValue(mpW) ?? 1.0);
     if (!resolved) return;
     if (widthW) widthW.value = resolved.width;
@@ -220,15 +236,19 @@ function syncRefineWidgetVisibility(node) {
     const needsCanvas = upscale || latentOnly;
     const aspect = widgetValue(widgetByName(node, "aspect_ratio"));
     const follow = isFollowAspect(aspect);
+    const scaleBy = isScaleByAspect(aspect);
     const custom = isCustomAspect(aspect);
     setWidgetVisible(node, "aspect_ratio", needsCanvas);
-    setWidgetVisible(node, "megapixels", needsCanvas && !follow && !custom);
+    setWidgetVisible(node, "scale_by", needsCanvas && scaleBy);
+    setWidgetVisible(node, "megapixels", needsCanvas && !follow && !scaleBy && !custom);
     setWidgetVisible(node, "width", needsCanvas && custom);
     setWidgetVisible(node, "height", needsCanvas && custom);
     const method = readUpscaleMethod(node);
     const showH3Model = latentOnly || (upscale && method === "h3_latent");
     setWidgetVisible(node, "upscale_method", upscale);
     setWidgetVisible(node, "latent_upscale_model", showH3Model);
+    setWidgetVisible(node, "latent_upscale_device", showH3Model);
+    setWidgetVisible(node, "latent_upscale_precision", showH3Model);
     setWidgetVisible(node, "h3_latent_model", false);
     setWidgetVisible(node, "upscale_model", false);
     setWidgetVisible(node, "schedule", false);
@@ -239,10 +259,16 @@ function syncRefineWidgetVisibility(node) {
     setWidgetVisible(node, "sampler", !latentOnly);
     setWidgetVisible(node, "passes", !latentOnly);
     setWidgetVisible(node, "seed_mode", !latentOnly);
+    setWidgetVisible(node, "second_pass_steps", !latentOnly);
+    setWidgetVisible(node, "first_sigma", !latentOnly);
+    setWidgetVisible(node, "sigma_spacing", !latentOnly);
+    const fixedSeed = String(widgetValue(widgetByName(node, "seed_mode")) ?? "") === "fixed";
+    setWidgetVisible(node, "second_seed", !latentOnly && fixedSeed);
+    setWidgetVisible(node, "strict", true);
     setWidgetVisible(node, "target_width", false);
     setWidgetVisible(node, "target_height", false);
     orderRefineWidgets(node);
-    if (needsCanvas && !follow && !custom) syncRefineComputedSize(node);
+    if (needsCanvas && !follow && !scaleBy && !custom) syncRefineComputedSize(node);
     try {
         const size = node.computeSize?.();
         if (Array.isArray(size) && size.length >= 2) {
@@ -282,6 +308,7 @@ function installRefineResolutionUI(node) {
     hookWidget(node, "mode", () => syncRefineWidgetVisibility(node));
     hookWidget(node, "upscale_method", () => syncRefineWidgetVisibility(node));
     hookWidget(node, "aspect_ratio", onAspect);
+    hookWidget(node, "seed_mode", () => syncRefineWidgetVisibility(node));
     hookWidget(node, "megapixels", () => syncRefineComputedSize(node));
     hookWidget(node, "width", () => {
         const w = widgetByName(node, "width");

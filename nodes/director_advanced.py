@@ -102,7 +102,7 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
 
     DESCRIPTION = (
         "MiniMax H3 Director with ordered model-only LoRAs and optional "
-        "attention, Sol-Attn, and EasyCache patches."
+        "CFGNorm, attention, Sol-Attn, and cache patches."
     )
 
     @classmethod
@@ -163,6 +163,18 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
                     "BOOLEAN",
                     {"default": False, "tooltip": "Log each cache decision in addition to the final reuse summary."},
                 ),
+                "enable_cfg_norm": ("BOOLEAN", {"default": False}),
+                "cfg_norm_strength": (
+                    "FLOAT",
+                    {
+                        "default": 0.95,
+                        "min": 0.0,
+                        "max": 100.0,
+                        "step": 0.01,
+                        "tooltip": "CFGNorm strength. multiple_steps_test uses 0.95.",
+                    },
+                ),
+                "cfg_norm_pre_cfg": ("BOOLEAN", {"default": False}),
             }
         )
         inputs["optional"] = optional
@@ -202,6 +214,9 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
         enable_firstblock_cache: bool = False,
         firstblock_cache_threshold: float = 0.08,
         firstblock_cache_verbose: bool = False,
+        enable_cfg_norm: bool = False,
+        cfg_norm_strength: float = 0.95,
+        cfg_norm_pre_cfg: bool = False,
         **kwargs: Any,
     ) -> Any:
         _validate_firstblock_cache_inputs(
@@ -221,6 +236,12 @@ class MiniMaxH3DirectorAdvanced(MiniMaxH3Director):
                 )
 
         def apply_model_patches(candidate: Any) -> Any:
+            if enable_cfg_norm:
+                patcher = _registered_node("CFGNorm")
+                candidate = _first_output(
+                    patcher.execute(candidate, float(cfg_norm_strength), bool(cfg_norm_pre_cfg))
+                )
+
             if enable_sage_attention:
                 patcher = _registered_node("PathchSageAttentionKJ")()
                 candidate = _first_output(patcher.patch(candidate, sage_attention, allow_sage_compile))
