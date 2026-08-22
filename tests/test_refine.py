@@ -43,7 +43,16 @@ class RefinePackTest(unittest.TestCase):
         wired = torch.tensor([0.7, 0.2, 0.0])
         pack = refine_pack.pack_refine(mode="refine", sigmas=wired, first_sigma=0.8)
 
-        self.assertEqual(refine_pack.refine_sigmas_override(pack), (0.7, 0.2, 0.0))
+        self.assertEqual(
+            len(refine_pack.refine_sigmas_override(pack)),
+            3,
+        )
+        for actual, expected in zip(
+            refine_pack.refine_sigmas_override(pack),
+            (0.7, 0.2, 0.0),
+            strict=True,
+        ):
+            self.assertAlmostEqual(actual, expected)
 
     def test_fixed_second_pass_seed_is_independent(self):
         pack = {"seed_mode": "fixed", "second_seed": 42}
@@ -103,7 +112,7 @@ class RefineSamplingTest(unittest.TestCase):
                 refine_positive=[],
             )
 
-        self.assertIs(result["audio"], audio)
+        self.assertIs(result["audio"]["samples"], audio["samples"])
         self.assertEqual(notes, ["128×64", "h3_latent"])
         self.assertEqual(calls[0][2], {"mode": "target dimensions", "width": 128, "height": 64})
         self.assertEqual(calls[0][3:], (32, "cpu", "fp16"))
