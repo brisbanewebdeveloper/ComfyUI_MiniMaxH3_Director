@@ -10829,28 +10829,42 @@ function migrateAdvancedWidgetValues(node, config) {
 
     const values = config.widgets_values;
     const widgetCount = node.widgets.length;
+    const cfgIndex = firstIndex + 3;
+    const firstBlockDefaults = [false, 0.08, false];
+    const cfgNormDefaults = [false, 0.95, false];
+    const hasFirstBlockCache = () => typeof values[firstIndex] === "boolean"
+        && typeof values[firstIndex + 1] === "number"
+        && Number.isFinite(values[firstIndex + 1])
+        && typeof values[firstIndex + 2] === "boolean";
+    const hasCfgNorm = () => typeof values[cfgIndex] === "boolean"
+        && typeof values[cfgIndex + 1] === "number"
+        && Number.isFinite(values[cfgIndex + 1])
+        && typeof values[cfgIndex + 2] === "boolean";
+
     if (values.length === widgetCount - 6) {
-        values.splice(firstIndex, 0, false, 0.08, false);
+        values.splice(firstIndex, 0, ...firstBlockDefaults, ...cfgNormDefaults);
         return true;
     }
     if (values.length === widgetCount - 3) {
-        const hasFirstBlockCache = typeof values[firstIndex] === "boolean"
-            && typeof values[firstIndex + 1] === "number"
-            && Number.isFinite(values[firstIndex + 1])
-            && typeof values[firstIndex + 2] === "boolean";
-        if (hasFirstBlockCache) return false;
-        values.splice(firstIndex, 0, false, 0.08, false);
+        if (hasFirstBlockCache()) {
+            values.splice(cfgIndex, 0, ...cfgNormDefaults);
+        } else {
+            values.splice(firstIndex, 0, ...firstBlockDefaults);
+        }
         return true;
     }
     if (values.length !== widgetCount) return false;
 
-    const valid = typeof values[firstIndex] === "boolean"
-        && typeof values[firstIndex + 1] === "number"
-        && Number.isFinite(values[firstIndex + 1])
-        && typeof values[firstIndex + 2] === "boolean";
-    if (valid) return false;
-    values.splice(firstIndex, 3, false, 0.08, false);
-    return true;
+    let migrated = false;
+    if (!hasFirstBlockCache()) {
+        values.splice(firstIndex, 3, ...firstBlockDefaults);
+        migrated = true;
+    }
+    if (!hasCfgNorm()) {
+        values.splice(cfgIndex, 3, ...cfgNormDefaults);
+        migrated = true;
+    }
+    return migrated;
 }
 
 function applyConfiguredWidgetValues(node, values) {
