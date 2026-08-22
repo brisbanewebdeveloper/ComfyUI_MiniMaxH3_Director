@@ -2,14 +2,14 @@
 
 import { app } from "../../scripts/app.js";
 import {
-    CUSTOM_ASPECT_RATIO,
     resolutionFromSelector,
     snapResolutionDim,
 } from "./minimax_gen_timeline.js";
 
 const REFINE_CLASS = "MiniMaxH3DirectorRefine";
-const FOLLOW_DIRECTOR_ASPECT = "跟随导演台";
-const SCALE_BY_ASPECT = "按倍数";
+const FOLLOW_DIRECTOR_ASPECT = "Follow Director";
+const SCALE_BY_ASPECT = "Scale by multiplier";
+const CUSTOM_ASPECT_RATIO = "Custom";
 
 function isRefineNode(node) {
     const cls = node?.comfyClass || node?.type || "";
@@ -55,25 +55,58 @@ function setWidgetVisible(node, name, visible) {
 
 function isCustomAspect(value) {
     const v = String(value ?? "").trim();
-    return v === CUSTOM_ASPECT_RATIO || v === "Custom" || v.startsWith("自定义");
+    return normalizeAspect(v) === CUSTOM_ASPECT_RATIO;
 }
 
-const ASPECT_CHOICES = new Set([
+const CANONICAL_ASPECT_CHOICES = [
     FOLLOW_DIRECTOR_ASPECT,
-    "Follow Director",
     SCALE_BY_ASPECT,
-    "Scale by multiplier",
     CUSTOM_ASPECT_RATIO,
-    "Custom",
-    "1:1 (方形)",
-    "2:3 (竖版照片)",
-    "3:2 (横版照片)",
-    "3:4 (竖版标准)",
-    "4:3 (标准)",
-    "9:16 (竖屏)",
-    "16:9 (宽屏)",
-    "21:9 (超宽)",
-]);
+    "1:1 (Square)",
+    "2:3 (Portrait photo)",
+    "3:2 (Landscape photo)",
+    "3:4 (Portrait standard)",
+    "4:3 (Standard)",
+    "9:16 (Portrait)",
+    "16:9 (Widescreen)",
+    "21:9 (Ultrawide)",
+];
+
+const LEGACY_ASPECT_ALIASES = {
+    "跟随导演台": FOLLOW_DIRECTOR_ASPECT,
+    follow: FOLLOW_DIRECTOR_ASPECT,
+    "按倍数": SCALE_BY_ASPECT,
+    scale_by: SCALE_BY_ASPECT,
+    "自定义": CUSTOM_ASPECT_RATIO,
+    "自定义 (Custom)": CUSTOM_ASPECT_RATIO,
+    "1:1 (方形)": "1:1 (Square)",
+    "2:3 (竖版照片)": "2:3 (Portrait photo)",
+    "3:2 (横版照片)": "3:2 (Landscape photo)",
+    "3:4 (竖版标准)": "3:4 (Portrait standard)",
+    "4:3 (标准)": "4:3 (Standard)",
+    "9:16 (竖屏)": "9:16 (Portrait)",
+    "16:9 (宽屏)": "16:9 (Widescreen)",
+    "21:9 (超宽)": "21:9 (Ultrawide)",
+    "1:1 (Square)": "1:1 (Square)",
+    "2:3 (Portrait Photo)": "2:3 (Portrait photo)",
+    "3:2 (Photo)": "3:2 (Landscape photo)",
+    "3:4 (Portrait Standard)": "3:4 (Portrait standard)",
+    "4:3 (Standard)": "4:3 (Standard)",
+    "9:16 (Portrait Widescreen)": "9:16 (Portrait)",
+    "16:9 (Widescreen)": "16:9 (Widescreen)",
+    "21:9 (Ultrawide)": "21:9 (Ultrawide)",
+};
+
+function normalizeAspect(value) {
+    const v = String(value ?? "").trim();
+    if (!v || v === "0" || v === "0.0") return FOLLOW_DIRECTOR_ASPECT;
+    if (LEGACY_ASPECT_ALIASES[v]) return LEGACY_ASPECT_ALIASES[v];
+    if (CANONICAL_ASPECT_CHOICES.includes(v)) return v;
+    if (v.startsWith("自定义")) return CUSTOM_ASPECT_RATIO;
+    const prefix = v.split(" ", 1)[0];
+    return CANONICAL_ASPECT_CHOICES.find((label) => label.startsWith(`${prefix} `))
+        || FOLLOW_DIRECTOR_ASPECT;
+}
 
 const UPSCALE_METHOD_VALUES = new Set(["lanczos", "nvidia_rtx_vsr", "h3_latent"]);
 const SAMPLER_HINTS = new Set([
@@ -163,8 +196,9 @@ function migrateRefineWidgets(node) {
     const mpW = widgetByName(node, "megapixels");
     const widthW = widgetByName(node, "width");
     const heightW = widgetByName(node, "height");
-    if (aspectW && !ASPECT_CHOICES.has(widgetValue(aspectW))) {
-        aspectW.value = FOLLOW_DIRECTOR_ASPECT;
+    if (aspectW) {
+        const normalized = normalizeAspect(widgetValue(aspectW));
+        if (widgetValue(aspectW) !== normalized) aspectW.value = normalized;
     }
     if (mpW) {
         const n = Number(widgetValue(mpW));
@@ -188,14 +222,11 @@ function migrateRefineWidgets(node) {
 }
 
 function isFollowAspect(value) {
-    const v = String(value ?? "").trim();
-    if (v === "0" || v === "0.0") return true;
-    return !v || v === FOLLOW_DIRECTOR_ASPECT || v === "Follow Director";
+    return normalizeAspect(value) === FOLLOW_DIRECTOR_ASPECT;
 }
 
 function isScaleByAspect(value) {
-    const v = String(value ?? "").trim();
-    return v === SCALE_BY_ASPECT || v === "Scale by multiplier";
+    return normalizeAspect(value) === SCALE_BY_ASPECT;
 }
 
 function readMode(node) {

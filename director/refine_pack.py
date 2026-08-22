@@ -141,21 +141,21 @@ def latent_upscale_model_name(pack: dict[str, Any] | None) -> str:
     return str(pack.get("h3_latent_model") or "").strip()
 
 
-FOLLOW_DIRECTOR_ASPECT = "跟随导演台"
-SCALE_BY_ASPECT = "按倍数"
-CUSTOM_ASPECT_RATIO = "自定义"
+FOLLOW_DIRECTOR_ASPECT = "Follow Director"
+SCALE_BY_ASPECT = "Scale by multiplier"
+CUSTOM_ASPECT_RATIO = "Custom"
 DEFAULT_UPSCALE_MEGAPIXELS = 1.0
 
-# Same labels/ratios as Director output bar / official ResolutionSelector.
+# English values keep the Refine node portable; the ratio math matches Director.
 RESOLUTION_ASPECTS = (
-    ("1:1 (方形)", 1, 1),
-    ("2:3 (竖版照片)", 2, 3),
-    ("3:2 (横版照片)", 3, 2),
-    ("3:4 (竖版标准)", 3, 4),
-    ("4:3 (标准)", 4, 3),
-    ("9:16 (竖屏)", 9, 16),
-    ("16:9 (宽屏)", 16, 9),
-    ("21:9 (超宽)", 21, 9),
+    ("1:1 (Square)", 1, 1),
+    ("2:3 (Portrait photo)", 2, 3),
+    ("3:2 (Landscape photo)", 3, 2),
+    ("3:4 (Portrait standard)", 3, 4),
+    ("4:3 (Standard)", 4, 3),
+    ("9:16 (Portrait)", 9, 16),
+    ("16:9 (Widescreen)", 16, 9),
+    ("21:9 (Ultrawide)", 21, 9),
 )
 
 ASPECT_RATIO_CHOICES = (
@@ -166,20 +166,28 @@ ASPECT_RATIO_CHOICES = (
 )
 
 _ASPECT_ALIASES = {
-    "Follow Director": FOLLOW_DIRECTOR_ASPECT,
+    "跟随导演台": FOLLOW_DIRECTOR_ASPECT,
     "follow": FOLLOW_DIRECTOR_ASPECT,
-    "Scale by multiplier": SCALE_BY_ASPECT,
+    "按倍数": SCALE_BY_ASPECT,
     "scale_by": SCALE_BY_ASPECT,
-    "Custom": CUSTOM_ASPECT_RATIO,
+    "自定义": CUSTOM_ASPECT_RATIO,
     "自定义 (Custom)": CUSTOM_ASPECT_RATIO,
-    "1:1 (Square)": "1:1 (方形)",
-    "2:3 (Portrait Photo)": "2:3 (竖版照片)",
-    "3:2 (Photo)": "3:2 (横版照片)",
-    "3:4 (Portrait Standard)": "3:4 (竖版标准)",
-    "4:3 (Standard)": "4:3 (标准)",
-    "9:16 (Portrait Widescreen)": "9:16 (竖屏)",
-    "16:9 (Widescreen)": "16:9 (宽屏)",
-    "21:9 (Ultrawide)": "21:9 (超宽)",
+    "1:1 (方形)": "1:1 (Square)",
+    "2:3 (竖版照片)": "2:3 (Portrait photo)",
+    "3:2 (横版照片)": "3:2 (Landscape photo)",
+    "3:4 (竖版标准)": "3:4 (Portrait standard)",
+    "4:3 (标准)": "4:3 (Standard)",
+    "9:16 (竖屏)": "9:16 (Portrait)",
+    "16:9 (宽屏)": "16:9 (Widescreen)",
+    "21:9 (超宽)": "21:9 (Ultrawide)",
+    "1:1 (Square)": "1:1 (Square)",
+    "2:3 (Portrait Photo)": "2:3 (Portrait photo)",
+    "3:2 (Photo)": "3:2 (Landscape photo)",
+    "3:4 (Portrait Standard)": "3:4 (Portrait standard)",
+    "4:3 (Standard)": "4:3 (Standard)",
+    "9:16 (Portrait Widescreen)": "9:16 (Portrait)",
+    "16:9 (Widescreen)": "16:9 (Widescreen)",
+    "21:9 (Ultrawide)": "21:9 (Ultrawide)",
 }
 
 

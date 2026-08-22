@@ -15,6 +15,48 @@ class FakeNodeOutput:
 
 
 class RefinePackTest(unittest.TestCase):
+    def test_aspect_choices_use_english_labels(self):
+        self.assertEqual(
+            refine_pack.ASPECT_RATIO_CHOICES,
+            (
+                "Follow Director",
+                "Scale by multiplier",
+                "1:1 (Square)",
+                "2:3 (Portrait photo)",
+                "3:2 (Landscape photo)",
+                "3:4 (Portrait standard)",
+                "4:3 (Standard)",
+                "9:16 (Portrait)",
+                "16:9 (Widescreen)",
+                "21:9 (Ultrawide)",
+                "Custom",
+            ),
+        )
+
+    def test_chinese_aspect_values_normalize_to_english(self):
+        legacy = {
+            "跟随导演台": "Follow Director",
+            "按倍数": "Scale by multiplier",
+            "1:1 (方形)": "1:1 (Square)",
+            "2:3 (竖版照片)": "2:3 (Portrait photo)",
+            "3:2 (横版照片)": "3:2 (Landscape photo)",
+            "3:4 (竖版标准)": "3:4 (Portrait standard)",
+            "4:3 (标准)": "4:3 (Standard)",
+            "9:16 (竖屏)": "9:16 (Portrait)",
+            "16:9 (宽屏)": "16:9 (Widescreen)",
+            "21:9 (超宽)": "21:9 (Ultrawide)",
+            "自定义": "Custom",
+        }
+        for old, expected in legacy.items():
+            with self.subTest(old=old):
+                self.assertEqual(refine_pack.normalize_aspect_ratio(old), expected)
+
+    def test_legacy_and_english_ratio_values_resolve_identically(self):
+        self.assertEqual(
+            refine_pack.resolution_from_selector("16:9 (宽屏)", 2.0),
+            refine_pack.resolution_from_selector("16:9 (Widescreen)", 2.0),
+        )
+
     def test_scale_by_resolves_reference_workflow_canvas(self):
         raw = refine_pack.pack_refine(
             mode="upscale",
