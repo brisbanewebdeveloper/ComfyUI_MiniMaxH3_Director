@@ -43,9 +43,9 @@ class MiniMaxH3DirectorRefine:
                     {
                         "default": "refine",
                         "tooltip": (
-                            "refine = 同分辨率二采（精修）。"
-                            "upscale = 先放大到目标画布再二采。"
-                            "latent_upscale = 只放大 H3 latent，不再二采。"
+                            "refine = same-resolution second pass (detail enhancement). "
+                            "upscale = upscale to the target canvas, then run a second pass. "
+                            "latent_upscale = upscale the H3 latent only; no second pass."
                         ),
                     },
                 ),
@@ -54,12 +54,11 @@ class MiniMaxH3DirectorRefine:
                     {
                         "default": "h3_latent",
                         "tooltip": (
-                            "仅 mode=upscale。"
-                            "h3_latent = 先按目标画布放大 H3 视频 latent，再二采"
-                            "（下方选 3D 权重）。"
-                            "lanczos = 像素插值；可另接 upscale_model（RealESRGAN 等）。"
-                            "nvidia_rtx_vsr = NVIDIA RTX Video Super Resolution"
-                            "（需 nvidia-vfx + NVIDIA GPU）。"
+                            "Used only when mode=upscale. "
+                            "h3_latent = upscale the H3 video latent to the target canvas, then run a second pass "
+                            "using the 3D weights below. "
+                            "lanczos = pixel interpolation; an upscale_model such as RealESRGAN can be connected. "
+                            "nvidia_rtx_vsr = NVIDIA RTX Video Super Resolution (requires nvidia-vfx and an NVIDIA GPU)."
                         ),
                     },
                 ),
@@ -67,11 +66,12 @@ class MiniMaxH3DirectorRefine:
                     list_h3_latent_upscale_models(),
                     {
                         "tooltip": (
-                            "H3 3D latent 放大权重。"
-                            "需要启用 Comfyui_Minimax_h3_latent_Upscaler。"
-                            "放到 ComfyUI/models/latent_upscale_models/，"
-                            "文件名含 3d（如 minimax_h3_latent_upscaler_3d_*.safetensors）。"
-                            "mode=latent_upscale，或 upscale + h3_latent 时使用。"
+                            "H3 3D latent upscaler weights. "
+                            "Enable Comfyui_Minimax_h3_latent_Upscaler and place the weights in "
+                            "ComfyUI/models/latent_upscale_models/. "
+                            "The filename must contain 3d, for example "
+                            "minimax_h3_latent_upscaler_3d_*.safetensors. "
+                            "Used with mode=latent_upscale or upscale + h3_latent."
                         ),
                     },
                 ),
@@ -80,8 +80,8 @@ class MiniMaxH3DirectorRefine:
                     {
                         "default": DEFAULT_REFINE_SIGMA_SAMPLER,
                         "tooltip": (
-                            "二采采样器。海螺案例用 euler；"
-                            "BasicScheduler 高质量二采常用 res_multistep。"
+                            "Second-pass sampler. The Hailuo example uses euler; "
+                            "res_multistep is commonly used for high-quality BasicScheduler second passes."
                         ),
                     },
                 ),
@@ -92,9 +92,9 @@ class MiniMaxH3DirectorRefine:
                         "min": 1,
                         "max": MAX_REFINE_PASSES,
                         "tooltip": (
-                            "精修次数。1 = 一次二采。"
-                            "upscale 时只有第 1 次放大，之后都是同分辨率精修。"
-                            "latent_upscale 不二采，此值无效。"
+                            "Number of refinement passes. 1 = one second pass. "
+                            "With upscale, only the first pass upscales; later passes refine at the same resolution. "
+                            "latent_upscale does not run a second pass, so this value has no effect."
                         ),
                     },
                 ),
@@ -104,9 +104,8 @@ class MiniMaxH3DirectorRefine:
                     "MODEL",
                     {
                         "tooltip": (
-                            "Second-pass UNET (二采模型)。"
-                            "不接则用导演台主模型。"
-                            "适合一采挂 Turbo LoRA、二采卸掉或换另一套。"
+                            "Second-pass UNET. If unconnected, the Director's main model is used. "
+                            "Useful for applying a Turbo LoRA on the first pass and removing it or switching models on the second."
                         ),
                     },
                 ),
@@ -115,10 +114,10 @@ class MiniMaxH3DirectorRefine:
                     {
                         "forceInput": True,
                         "tooltip": (
-                            "可选二采噪声表。接 Comfy 自带 BasicScheduler、ManualSigmas"
-                            "或自定义 SIGMAS 时优先使用。未接线则使用下方内置二采设置。"
-                            "BasicScheduler 请接和二采相同的 MODEL（导演台主模型或 refine_model）。"
-                            "H3 的 SigmaShift 仍由 Refine 内部套上。"
+                            "Optional second-pass noise schedule. When connected to ComfyUI BasicScheduler, ManualSigmas, "
+                            "or custom SIGMAS, it takes priority over the built-in second-pass settings below. "
+                            "Connect BasicScheduler to the same MODEL used for the second pass (the Director's main model or refine_model). "
+                            "Refine still applies the H3 SigmaShift internally."
                         ),
                     },
                 ),
@@ -126,9 +125,9 @@ class MiniMaxH3DirectorRefine:
                     "UPSCALE_MODEL",
                     {
                         "tooltip": (
-                            "可选。用「加载放大模型」接入，例如 RealESRGAN_x2plus。"
-                            "仅 mode=upscale 且 upscale_method=lanczos 时使用。"
-                            "不接则纯 lanczos 插值。选 nvidia_rtx_vsr / h3_latent 时忽略此口。"
+                            "Optional. Connect an upscaler from Load Upscale Model, such as RealESRGAN_x2plus. "
+                            "Used only with mode=upscale and upscale_method=lanczos. "
+                            "If unconnected, pure lanczos interpolation is used. Ignored with nvidia_rtx_vsr or h3_latent."
                         ),
                     },
                 ),
@@ -136,7 +135,7 @@ class MiniMaxH3DirectorRefine:
                     list(SEED_MODES),
                     {
                         "default": "inherit",
-                        "tooltip": "inherit = 用导演台 seed；offset = 每轮 seed+1、+2…。",
+                        "tooltip": "inherit = use the Director seed; offset = add 1, 2, and so on for each pass.",
                     },
                 ),
                 "aspect_ratio": (
@@ -144,11 +143,10 @@ class MiniMaxH3DirectorRefine:
                     {
                         "default": FOLLOW_DIRECTOR_ASPECT,
                         "tooltip": (
-                            "放大目标画布，算法同导演台「输出分辨率」。"
-                            "导演台是一采分辨率（例如 0.4 MP），这里是放大后的目标"
-                            "（例如 1.0 MP）。跟随导演台：按导演台画布比例推 720P 档。"
-                            "比例预设：配合百万像素。"
-                            "自定义：直接填宽高（对齐 ×32）。"
+                            "Target canvas for upscaling, using the same algorithm as the Director's output resolution. "
+                            "The Director resolution is the first-pass size (for example, 0.4 MP); this is the enlarged target "
+                            "(for example, 1.0 MP). Follow Director derives a 720p-class target from the Director canvas ratio. "
+                            "Ratio presets work with megapixels. Custom uses the width and height fields, aligned to ×32."
                         ),
                     },
                 ),
@@ -160,8 +158,8 @@ class MiniMaxH3DirectorRefine:
                         "max": 16.0,
                         "step": 0.1,
                         "tooltip": (
-                            "百万像素，同导演台 ResolutionSelector。"
-                            "1.0 MP 在 16:9 约为 1376×768（对齐 32）。仅比例预设时生效。"
+                            "Megapixels, matching the Director ResolutionSelector. "
+                            "1.0 MP at 16:9 is approximately 1376×768 (aligned to 32). Used only with ratio presets."
                         ),
                     },
                 ),
@@ -172,7 +170,7 @@ class MiniMaxH3DirectorRefine:
                         "min": 0,
                         "max": 8192,
                         "step": 32,
-                        "tooltip": "自定义宽度（×32）。仅「自定义」时生效。",
+                        "tooltip": "Custom width (×32). Used only with Custom aspect ratio.",
                     },
                 ),
                 "height": (
@@ -182,7 +180,7 @@ class MiniMaxH3DirectorRefine:
                         "min": 0,
                         "max": 8192,
                         "step": 32,
-                        "tooltip": "自定义高度（×32）。仅「自定义」时生效。",
+                        "tooltip": "Custom height (×32). Used only with Custom aspect ratio.",
                     },
                 ),
                 "skip_fl2v": (
@@ -190,8 +188,8 @@ class MiniMaxH3DirectorRefine:
                     {
                         "default": False,
                         "tooltip": (
-                            "首尾帧（fl2v）仍放大到目标分辨率，但跳过二采以保护关键帧。"
-                            "默认关闭：放大后重建关键帧约束并执行二采。"
+                            "For first-and-last-frame (fl2v) clips, upscale to the target resolution but skip the second pass "
+                            "to protect the keyframes. Disabled by default: rebuild keyframe conditioning after upscaling and run the second pass."
                         ),
                     },
                 ),
@@ -202,28 +200,28 @@ class MiniMaxH3DirectorRefine:
                         "min": 1.0,
                         "max": 4.0,
                         "step": 0.05,
-                        "tooltip": "aspect_ratio=按倍数 时使用；最终宽高仍对齐 ×32。",
+                        "tooltip": "Used when aspect_ratio=Scale by multiplier; the final width and height are still aligned to ×32.",
                     },
                 ),
                 "latent_upscale_device": (
                     list(LATENT_UPSCALE_DEVICES),
                     {
                         "default": "auto",
-                        "tooltip": "H3 3D latent upscaler device。auto 优先 CUDA，否则 CPU。",
+                        "tooltip": "H3 3D latent upscaler device. auto prefers CUDA and otherwise uses the CPU.",
                     },
                 ),
                 "latent_upscale_precision": (
                     list(LATENT_UPSCALE_PRECISIONS),
                     {
                         "default": "fp16",
-                        "tooltip": "H3 3D latent upscaler compute precision。fp16 是默认速度/显存平衡。",
+                        "tooltip": "H3 3D latent upscaler compute precision. fp16 is the default speed/VRAM balance.",
                     },
                 ),
                 "strict": (
                     "BOOLEAN",
                     {
                         "default": True,
-                        "tooltip": "放大或二采失败时停止工作流，避免静默输出低分辨率一采结果。",
+                        "tooltip": "Stop the workflow if upscaling or the second pass fails, avoiding a silent low-resolution first-pass result.",
                     },
                 ),
                 "second_pass_steps": (
@@ -232,7 +230,7 @@ class MiniMaxH3DirectorRefine:
                         "default": 2,
                         "min": 1,
                         "max": 100,
-                        "tooltip": "未接 SIGMAS 时内置二采步数。multiple_steps_test 使用 2。",
+                        "tooltip": "Built-in second-pass steps when SIGMAS is unconnected. multiple_steps_test uses 2.",
                     },
                 ),
                 "first_sigma": (
@@ -242,14 +240,14 @@ class MiniMaxH3DirectorRefine:
                         "min": 0.0,
                         "max": 20000.0,
                         "step": 0.01,
-                        "tooltip": "未接 SIGMAS 时的首 sigma（工作流里的 denoise）。",
+                        "tooltip": "First sigma when SIGMAS is unconnected (the workflow denoise value).",
                     },
                 ),
                 "sigma_spacing": (
                     list(SIGMA_SPACINGS),
                     {
                         "default": "linear",
-                        "tooltip": "未接 SIGMAS 时中间 sigma 的分布。",
+                        "tooltip": "Distribution of intermediate sigmas when SIGMAS is unconnected.",
                     },
                 ),
                 "second_seed": (
@@ -258,7 +256,7 @@ class MiniMaxH3DirectorRefine:
                         "default": 0,
                         "min": 0,
                         "max": 0xFFFFFFFFFFFFFFFF,
-                        "tooltip": "seed_mode=fixed 时的二采 seed。",
+                        "tooltip": "Second-pass seed when seed_mode=fixed.",
                     },
                 ),
             },

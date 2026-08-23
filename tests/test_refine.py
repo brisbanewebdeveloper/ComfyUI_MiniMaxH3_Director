@@ -1,10 +1,12 @@
 import math
+import re
 import types
 import unittest
 from unittest.mock import patch
 
 import torch
 
+from ComfyUI_MiniMaxH3_Director.nodes.director_refine import MiniMaxH3DirectorRefine
 from ComfyUI_MiniMaxH3_Director.director import refine_pack
 from ComfyUI_MiniMaxH3_Director.director import refine_sampling
 
@@ -15,6 +17,15 @@ class FakeNodeOutput:
 
 
 class RefinePackTest(unittest.TestCase):
+    def test_refine_tooltips_are_english(self):
+        input_types = MiniMaxH3DirectorRefine.INPUT_TYPES()
+        fields = [*input_types["required"].values(), *input_types["optional"].values()]
+        tooltips = [field[1]["tooltip"] for field in fields]
+
+        self.assertEqual(len(tooltips), 22)
+        self.assertTrue(all(tooltips))
+        self.assertFalse(any(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff]", tooltip) for tooltip in tooltips))
+
     def test_aspect_choices_use_english_labels(self):
         self.assertEqual(
             refine_pack.ASPECT_RATIO_CHOICES,
