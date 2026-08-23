@@ -17,6 +17,8 @@ from ..director.refine_pack import (
     REFINE_MODES,
     SEED_MODES,
     SIGMA_SPACINGS,
+    TILED_REFINE_BLEND_MODES,
+    TILED_REFINE_OVERLAP_MODES,
     UPSCALE_METHODS,
     infer_upscale_target,
     pack_refine,
@@ -259,6 +261,121 @@ class MiniMaxH3DirectorRefine:
                         "tooltip": "Second-pass seed when seed_mode=fixed.",
                     },
                 ),
+                "bd_grp_tiled_refine": (
+                    "BDGROUP",
+                    {
+                        "default": "VRAM-efficient tiled Refine",
+                        "tooltip": "Optional bounded-memory processing for the second diffusion pass.",
+                    },
+                ),
+                "tiled_refine_enabled": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "Split the second diffusion pass into bounded temporal chunks and/or spatial tiles. "
+                            "Disabled preserves the existing full-latent Refine path exactly. Audio is preserved unchanged when enabled."
+                        ),
+                    },
+                ),
+                "tiled_refine_temporal": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Process the second pass in overlapping temporal chunks to bound VRAM for long segments.",
+                    },
+                ),
+                "tiled_refine_chunk_length": (
+                    "INT",
+                    {
+                        "default": 85,
+                        "min": 17,
+                        "max": 3600,
+                        "step": 17,
+                        "tooltip": "Temporal chunk length in output frames. Must be a multiple of 17.",
+                    },
+                ),
+                "tiled_refine_temporal_overlap": (
+                    "INT",
+                    {
+                        "default": 17,
+                        "min": 0,
+                        "max": 3570,
+                        "step": 17,
+                        "tooltip": "Frames shared between temporal chunks. Must be a multiple of 17 and smaller than chunk length.",
+                    },
+                ),
+                "tiled_refine_spatial": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Process every temporal chunk as overlapping spatial tiles to bound high-resolution activation memory.",
+                    },
+                ),
+                "tiled_refine_tile_width": (
+                    "INT",
+                    {
+                        "default": 480,
+                        "min": 32,
+                        "max": 8192,
+                        "step": 32,
+                        "tooltip": "Spatial tile width in output pixels (×32).",
+                    },
+                ),
+                "tiled_refine_tile_height": (
+                    "INT",
+                    {
+                        "default": 864,
+                        "min": 32,
+                        "max": 8192,
+                        "step": 32,
+                        "tooltip": "Spatial tile height in output pixels (×32).",
+                    },
+                ),
+                "tiled_refine_tile_overlap": (
+                    "INT",
+                    {
+                        "default": 128,
+                        "min": 0,
+                        "max": 4096,
+                        "step": 32,
+                        "tooltip": "Horizontal and vertical tile overlap in output pixels (×32).",
+                    },
+                ),
+                "tiled_refine_fade": (
+                    "INT",
+                    {
+                        "default": 32,
+                        "min": 0,
+                        "max": 4096,
+                        "step": 32,
+                        "tooltip": "Width of the denoising and stitching transition inside each overlap (×32).",
+                    },
+                ),
+                "tiled_refine_min_tile_size": (
+                    "INT",
+                    {
+                        "default": 256,
+                        "min": 32,
+                        "max": 8192,
+                        "step": 32,
+                        "tooltip": "Minimum edge-tile size; small remainder tiles are expanded into the preceding overlap.",
+                    },
+                ),
+                "tiled_refine_overlap_mode": (
+                    list(TILED_REFINE_OVERLAP_MODES),
+                    {
+                        "default": "earlier",
+                        "tooltip": "Choose whether the already-stitched or incoming tile dominates an overlap.",
+                    },
+                ),
+                "tiled_refine_blend": (
+                    list(TILED_REFINE_BLEND_MODES),
+                    {
+                        "default": "linear",
+                        "tooltip": "Transition curve used when stitching overlapping chunks and tiles.",
+                    },
+                ),
             },
         }
 
@@ -303,6 +420,18 @@ class MiniMaxH3DirectorRefine:
         first_sigma=0.8,
         sigma_spacing="linear",
         second_seed=0,
+        tiled_refine_enabled=False,
+        tiled_refine_temporal=True,
+        tiled_refine_chunk_length=85,
+        tiled_refine_temporal_overlap=17,
+        tiled_refine_spatial=True,
+        tiled_refine_tile_width=480,
+        tiled_refine_tile_height=864,
+        tiled_refine_tile_overlap=128,
+        tiled_refine_fade=32,
+        tiled_refine_min_tile_size=256,
+        tiled_refine_overlap_mode="earlier",
+        tiled_refine_blend="linear",
         latent_upscale_model=None,
         upscale_model=None,
         h3_latent_model="",
@@ -357,6 +486,18 @@ class MiniMaxH3DirectorRefine:
             first_sigma=first_sigma,
             sigma_spacing=sigma_spacing,
             second_seed=second_seed,
+            tiled_refine_enabled=tiled_refine_enabled,
+            tiled_refine_temporal=tiled_refine_temporal,
+            tiled_refine_chunk_length=tiled_refine_chunk_length,
+            tiled_refine_temporal_overlap=tiled_refine_temporal_overlap,
+            tiled_refine_spatial=tiled_refine_spatial,
+            tiled_refine_tile_width=tiled_refine_tile_width,
+            tiled_refine_tile_height=tiled_refine_tile_height,
+            tiled_refine_tile_overlap=tiled_refine_tile_overlap,
+            tiled_refine_fade=tiled_refine_fade,
+            tiled_refine_min_tile_size=tiled_refine_min_tile_size,
+            tiled_refine_overlap_mode=tiled_refine_overlap_mode,
+            tiled_refine_blend=tiled_refine_blend,
             upscale_method=upscale_method,
             sample_model=refine_model if refine_model is not None else model,
             latent_upscale_model=latent_upscale_model if latent_upscale_model is not None else h3_latent_model,

@@ -19,6 +19,8 @@ UPSCALE_METHODS = ("lanczos", "nvidia_rtx_vsr", "h3_latent")
 LATENT_UPSCALE_DEVICES = ("auto", "cuda", "cpu")
 LATENT_UPSCALE_PRECISIONS = ("fp16", "fp32", "bf16")
 SIGMA_SPACINGS = ("linear", "cosine", "sine")
+TILED_REFINE_BLEND_MODES = ("linear", "smoothstep", "overwrite")
+TILED_REFINE_OVERLAP_MODES = ("earlier", "later")
 MAX_REFINE_PASSES = 9999
 # 海螺参考生视频二采：ManualSigmas 4 个数 = euler 3 步。
 HAILUO_REFINE_SIGMAS = (0.85, 0.7250, 0.4219, 0.0)
@@ -309,6 +311,18 @@ def pack_refine(
     first_sigma: float = 0.8,
     sigma_spacing: str = "linear",
     second_seed: int = 0,
+    tiled_refine_enabled: bool = False,
+    tiled_refine_temporal: bool = True,
+    tiled_refine_chunk_length: int = 85,
+    tiled_refine_temporal_overlap: int = 17,
+    tiled_refine_spatial: bool = True,
+    tiled_refine_tile_width: int = 480,
+    tiled_refine_tile_height: int = 864,
+    tiled_refine_tile_overlap: int = 128,
+    tiled_refine_fade: int = 32,
+    tiled_refine_min_tile_size: int = 256,
+    tiled_refine_overlap_mode: str = "earlier",
+    tiled_refine_blend: str = "linear",
     upscale_method: str = "h3_latent",
     sample_model=None,
     latent_upscale_model=None,
@@ -349,6 +363,22 @@ def pack_refine(
     precision = str(latent_upscale_precision or "fp16").strip().lower()
     if precision not in LATENT_UPSCALE_PRECISIONS:
         precision = "fp16"
+    tiled = normalize_tiled_refine_settings(
+        {
+            "tiled_refine_enabled": tiled_refine_enabled,
+            "tiled_refine_temporal": tiled_refine_temporal,
+            "tiled_refine_chunk_length": tiled_refine_chunk_length,
+            "tiled_refine_temporal_overlap": tiled_refine_temporal_overlap,
+            "tiled_refine_spatial": tiled_refine_spatial,
+            "tiled_refine_tile_width": tiled_refine_tile_width,
+            "tiled_refine_tile_height": tiled_refine_tile_height,
+            "tiled_refine_tile_overlap": tiled_refine_tile_overlap,
+            "tiled_refine_fade": tiled_refine_fade,
+            "tiled_refine_min_tile_size": tiled_refine_min_tile_size,
+            "tiled_refine_overlap_mode": tiled_refine_overlap_mode,
+            "tiled_refine_blend": tiled_refine_blend,
+        }
+    )
     return {
         "enabled": True,
         "mode": mode,
@@ -382,6 +412,7 @@ def pack_refine(
         "sigmas_parsed": parsed,
         "sigmas_tensor": sigma_tensor,
         "has_sigmas_tensor": sigma_tensor is not None,
+        **tiled,
     }
 
 
@@ -462,6 +493,7 @@ def normalize_refine_pack(
     first_sigma = raw.get("first_sigma")
     if first_sigma is None:
         first_sigma = 0.8
+    tiled = normalize_tiled_refine_settings(raw)
     return {
         "enabled": True,
         "mode": mode,
@@ -495,6 +527,39 @@ def normalize_refine_pack(
         "sigmas_parsed": parsed,
         "sigmas_tensor": sigma_tensor,
         "has_sigmas_tensor": sigma_tensor is not None,
+        **tiled,
+    }
+
+
+def normalize_tiled_refine_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalize optional bounded-memory second-pass settings."""
+    raw = raw or {}
+
+    def bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
+        value = raw.get(name)
+        if value is None:
+            value = default
+        return max(minimum, min(maximum, int(value)))
+
+    blend = str(raw.get("tiled_refine_blend") or "linear").strip().lower()
+    if blend not in TILED_REFINE_BLEND_MODES:
+        blend = "linear"
+    overlap_mode = str(raw.get("tiled_refine_overlap_mode") or "earlier").strip().lower()
+    if overlap_mode not in TILED_REFINE_OVERLAP_MODES:
+        overlap_mode = "earlier"
+    return {
+        "tiled_refine_enabled": bool(raw.get("tiled_refine_enabled", False)),
+        "tiled_refine_temporal": bool(raw.get("tiled_refine_temporal", True)),
+        "tiled_refine_chunk_length": bounded_int("tiled_refine_chunk_length", 85, 17, 3600),
+        "tiled_refine_temporal_overlap": bounded_int("tiled_refine_temporal_overlap", 17, 0, 3570),
+        "tiled_refine_spatial": bool(raw.get("tiled_refine_spatial", True)),
+        "tiled_refine_tile_width": bounded_int("tiled_refine_tile_width", 480, 32, 8192),
+        "tiled_refine_tile_height": bounded_int("tiled_refine_tile_height", 864, 32, 8192),
+        "tiled_refine_tile_overlap": bounded_int("tiled_refine_tile_overlap", 128, 0, 4096),
+        "tiled_refine_fade": bounded_int("tiled_refine_fade", 32, 0, 4096),
+        "tiled_refine_min_tile_size": bounded_int("tiled_refine_min_tile_size", 256, 32, 8192),
+        "tiled_refine_overlap_mode": overlap_mode,
+        "tiled_refine_blend": blend,
     }
 
 
@@ -557,6 +622,20 @@ def refine_fingerprint(plan) -> dict[str, Any]:
         "refine_second_seed": int(pack.get("second_seed") or 0),
         "refine_sample_model": bool(pack.get("has_sample_model") or pack.get("sample_model") is not None),
         "refine_skip_fl2v": bool(pack.get("skip_fl2v", True)),
+        "refine_tiled": bool(pack.get("tiled_refine_enabled", False)),
+        "refine_tiled_temporal": bool(pack.get("tiled_refine_temporal", True)),
+        "refine_tiled_chunk": int(pack.get("tiled_refine_chunk_length") or 85),
+        "refine_tiled_temporal_overlap": int(pack.get("tiled_refine_temporal_overlap") or 0),
+        "refine_tiled_spatial": bool(pack.get("tiled_refine_spatial", True)),
+        "refine_tiled_tile": (
+            f"{int(pack.get('tiled_refine_tile_width') or 480)}x"
+            f"{int(pack.get('tiled_refine_tile_height') or 864)}"
+        ),
+        "refine_tiled_tile_overlap": int(pack.get("tiled_refine_tile_overlap") or 0),
+        "refine_tiled_fade": int(pack.get("tiled_refine_fade") or 0),
+        "refine_tiled_min_tile": int(pack.get("tiled_refine_min_tile_size") or 256),
+        "refine_tiled_overlap_mode": pack.get("tiled_refine_overlap_mode") or "earlier",
+        "refine_tiled_blend": pack.get("tiled_refine_blend") or "linear",
     }
 
 
@@ -584,6 +663,21 @@ def refine_report_line(plan) -> str | None:
         )
     n_passes = refine_passes_for(pack)
     pass_note = f", passes={n_passes}" if n_passes > 1 else ""
+    tiled_note = ""
+    if pack.get("tiled_refine_enabled", False) and mode != "latent_upscale":
+        parts = []
+        if pack.get("tiled_refine_temporal", True):
+            parts.append(
+                f"{int(pack.get('tiled_refine_chunk_length') or 85)}f/"
+                f"{int(pack.get('tiled_refine_temporal_overlap') or 0)}f"
+            )
+        if pack.get("tiled_refine_spatial", True):
+            parts.append(
+                f"{int(pack.get('tiled_refine_tile_width') or 480)}×"
+                f"{int(pack.get('tiled_refine_tile_height') or 864)}/"
+                f"{int(pack.get('tiled_refine_tile_overlap') or 0)}"
+            )
+        tiled_note = ", tiled " + "+".join(parts or ["single piece"])
     model_note = (
         ", 二采模型" if (pack.get("has_sample_model") or pack.get("sample_model") is not None) else ""
     )
@@ -597,5 +691,5 @@ def refine_report_line(plan) -> str | None:
     step_note = f" {n_steps}-step" if n_steps else ""
     return (
         f"Refine: ON ({mode}, {how}{step_note}"
-        f"{pass_note}{model_note}{extra})"
+        f"{pass_note}{model_note}{extra}{tiled_note})"
     )

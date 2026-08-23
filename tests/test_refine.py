@@ -22,7 +22,7 @@ class RefinePackTest(unittest.TestCase):
         fields = [*input_types["required"].values(), *input_types["optional"].values()]
         tooltips = [field[1]["tooltip"] for field in fields]
 
-        self.assertEqual(len(tooltips), 22)
+        self.assertEqual(len(tooltips), 35)
         self.assertTrue(all(tooltips))
         self.assertFalse(any(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff]", tooltip) for tooltip in tooltips))
 
@@ -118,6 +118,62 @@ class RefinePackTest(unittest.TestCase):
 
         self.assertTrue(refine_pack.refine_will_sample(plan, segment))
 
+    def test_tiled_refine_is_disabled_by_default(self):
+        pack = refine_pack.pack_refine()
+
+        self.assertFalse(pack["tiled_refine_enabled"])
+        self.assertTrue(pack["tiled_refine_temporal"])
+        self.assertTrue(pack["tiled_refine_spatial"])
+        self.assertEqual(pack["tiled_refine_chunk_length"], 85)
+        self.assertEqual(pack["tiled_refine_tile_width"], 480)
+        self.assertEqual(pack["tiled_refine_tile_height"], 864)
+
+    def test_tiled_refine_settings_survive_normalization(self):
+        pack = refine_pack.pack_refine(
+            tiled_refine_enabled=True,
+            tiled_refine_chunk_length=102,
+            tiled_refine_temporal_overlap=34,
+            tiled_refine_tile_width=640,
+            tiled_refine_tile_height=960,
+            tiled_refine_overlap_mode="later",
+            tiled_refine_blend="smoothstep",
+        )
+
+        normalized = refine_pack.normalize_refine_pack(pack)
+
+        self.assertTrue(normalized["tiled_refine_enabled"])
+        self.assertEqual(normalized["tiled_refine_chunk_length"], 102)
+        self.assertEqual(normalized["tiled_refine_temporal_overlap"], 34)
+        self.assertEqual(normalized["tiled_refine_tile_width"], 640)
+        self.assertEqual(normalized["tiled_refine_tile_height"], 960)
+        self.assertEqual(normalized["tiled_refine_overlap_mode"], "later")
+        self.assertEqual(normalized["tiled_refine_blend"], "smoothstep")
+
+    def test_tiled_refine_zero_overlaps_are_preserved(self):
+        pack = refine_pack.pack_refine(
+            tiled_refine_temporal_overlap=0,
+            tiled_refine_tile_overlap=0,
+            tiled_refine_fade=0,
+        )
+
+        self.assertEqual(pack["tiled_refine_temporal_overlap"], 0)
+        self.assertEqual(pack["tiled_refine_tile_overlap"], 0)
+        self.assertEqual(pack["tiled_refine_fade"], 0)
+
+    def test_tiled_refine_settings_change_cache_fingerprint_and_report(self):
+        disabled = types.SimpleNamespace(refine=refine_pack.pack_refine())
+        enabled = types.SimpleNamespace(
+            refine=refine_pack.pack_refine(tiled_refine_enabled=True)
+        )
+
+        disabled_fingerprint = refine_pack.refine_fingerprint(disabled)
+        enabled_fingerprint = refine_pack.refine_fingerprint(enabled)
+
+        self.assertFalse(disabled_fingerprint["refine_tiled"])
+        self.assertTrue(enabled_fingerprint["refine_tiled"])
+        self.assertNotEqual(disabled_fingerprint, enabled_fingerprint)
+        self.assertIn("tiled 85f/17f+480×864/128", refine_pack.refine_report_line(enabled))
+
 
 class RefineSamplingTest(unittest.TestCase):
     def test_external_upscaler_receives_resolved_target_and_compute_options(self):
@@ -205,6 +261,50 @@ class RefineSamplingTest(unittest.TestCase):
                 shift_video=12.0,
                 shift_audio=3.0,
             )
+
+    def test_enabled_tiled_refine_replaces_full_second_pass(self):
+        samples = {"samples": object()}
+        refined = {"samples": object()}
+        plan = types.SimpleNamespace(
+            refine={
+                "enabled": True,
+                "mode": "refine",
+                "passes": 1,
+                "sampler": "euler",
+                "sigmas_parsed": (0.8, 0.4, 0.0),
+                "tiled_refine_enabled": True,
+                "tiled_refine_temporal": True,
+                "tiled_refine_spatial": True,
+            }
+        )
+        segment = types.SimpleNamespace(index=0, task_key="t2v")
+
+        with patch.object(
+            refine_sampling,
+            "sample_tiled_refine",
+            return_value=refined,
+        ) as tiled, patch.object(refine_sampling, "sample_single_stage") as full:
+            result, note = refine_sampling.apply_segment_refine(
+                plan,
+                segment,
+                samples=samples,
+                model=object(),
+                vae=object(),
+                positive=[],
+                negative=[],
+                seed=0,
+                cfg=1.0,
+                first_steps=4,
+                sampler_name="euler",
+                scheduler="simple",
+                shift_video=12.0,
+                shift_audio=3.0,
+            )
+
+        self.assertIs(result, refined)
+        self.assertIn("tiled=85f/0f+480×864", note)
+        tiled.assert_called_once()
+        full.assert_not_called()
 
 
 if __name__ == "__main__":

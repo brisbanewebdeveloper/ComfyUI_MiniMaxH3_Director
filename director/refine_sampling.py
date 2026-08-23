@@ -18,6 +18,7 @@ from .refine_pack import (
     refine_sigmas_override,
     refine_uses_h3_latent,
 )
+from .tiled_refine import sample_tiled_refine
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.refine")
 
@@ -600,6 +601,32 @@ def apply_segment_refine(
         sigma_steps = max(1, len(sigma_list) - 1)
         how = "sigmas wired" if wired_sigmas else f"sigma {sigma_sampler}"
         note_parts.append(f"{how} {sigma_steps}-step")
+        tiled_refine = bool(pack.get("tiled_refine_enabled", False))
+        if tiled_refine:
+            tiled_modes = []
+            if pack.get("tiled_refine_temporal", True):
+                tiled_modes.append(
+                    f"{int(pack.get('tiled_refine_chunk_length') or 85)}f/"
+                    f"{int(pack.get('tiled_refine_temporal_overlap') or 0)}f"
+                )
+            if pack.get("tiled_refine_spatial", True):
+                tiled_modes.append(
+                    f"{int(pack.get('tiled_refine_tile_width') or 480)}×"
+                    f"{int(pack.get('tiled_refine_tile_height') or 864)}"
+                )
+            note_parts.append("tiled=" + "+".join(tiled_modes or ["single piece"]))
+            log.info(
+                "Director tiled Refine: temporal=%s (%df, overlap=%df), "
+                "spatial=%s (%d×%d, overlap=%d, fade=%d), audio preserved",
+                bool(pack.get("tiled_refine_temporal", True)),
+                int(pack.get("tiled_refine_chunk_length") or 85),
+                int(pack.get("tiled_refine_temporal_overlap") or 0),
+                bool(pack.get("tiled_refine_spatial", True)),
+                int(pack.get("tiled_refine_tile_width") or 480),
+                int(pack.get("tiled_refine_tile_height") or 864),
+                int(pack.get("tiled_refine_tile_overlap") or 0),
+                int(pack.get("tiled_refine_fade") or 0),
+            )
         if refine_model is not model and sigma_steps <= 4:
             log.warning(
                 "Refine sigma pass is short. "
@@ -620,26 +647,64 @@ def apply_segment_refine(
             )
             if on_phase:
                 on_phase("refine", (i + 0.5) / n_passes)
-            work = sample_single_stage(
-                model=refine_model,
-                positive=refine_positive,
-                negative=negative,
-                latent=work,
-                seed=refine_seed_for(pack, seed, pass_index=i),
-                cfg=cfg,
-                steps=sigma_steps,
-                sampler_name=sigma_sampler,
-                scheduler=scheduler,
-                shift_video=shift_video,
-                shift_audio=shift_audio,
-                denoise=1.0,
-                on_phase=None,
-                on_step_preview=on_step_preview,
-                preview_every=-1,
-                phase_name="refine",
-                sigmas=sigma_list,
-                apply_shift=True,
-            )
+            pass_seed = refine_seed_for(pack, seed, pass_index=i)
+            if tiled_refine:
+                def sample_piece(piece, piece_positive, piece_negative, piece_seed):
+                    return sample_single_stage(
+                        model=refine_model,
+                        positive=piece_positive,
+                        negative=piece_negative,
+                        latent=piece,
+                        seed=piece_seed,
+                        cfg=cfg,
+                        steps=sigma_steps,
+                        sampler_name=sigma_sampler,
+                        scheduler=scheduler,
+                        shift_video=shift_video,
+                        shift_audio=shift_audio,
+                        denoise=1.0,
+                        on_phase=None,
+                        on_step_preview=None,
+                        preview_every=-1,
+                        phase_name="refine tile",
+                        sigmas=sigma_list,
+                        apply_shift=True,
+                    )
+
+                def on_tiled_progress(done: int, total: int) -> None:
+                    if on_phase:
+                        on_phase("refine", (i + done / max(total, 1)) / n_passes)
+
+                work = sample_tiled_refine(
+                    work,
+                    refine_positive,
+                    negative,
+                    pack,
+                    seed=pass_seed,
+                    sample_piece=sample_piece,
+                    on_progress=on_tiled_progress,
+                )
+            else:
+                work = sample_single_stage(
+                    model=refine_model,
+                    positive=refine_positive,
+                    negative=negative,
+                    latent=work,
+                    seed=pass_seed,
+                    cfg=cfg,
+                    steps=sigma_steps,
+                    sampler_name=sigma_sampler,
+                    scheduler=scheduler,
+                    shift_video=shift_video,
+                    shift_audio=shift_audio,
+                    denoise=1.0,
+                    on_phase=None,
+                    on_step_preview=on_step_preview,
+                    preview_every=-1,
+                    phase_name="refine",
+                    sigmas=sigma_list,
+                    apply_shift=True,
+                )
             last_ok = work
             if on_pass is not None:
                 try:
