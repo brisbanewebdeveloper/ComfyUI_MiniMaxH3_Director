@@ -181,8 +181,19 @@ class RefineSamplingTest(unittest.TestCase):
 
         class ExternalUpscaler:
             @classmethod
-            def execute(cls, latent, model_name, mode, align, device, precision):
-                calls.append((latent, model_name, mode, align, device, precision))
+            def execute(
+                cls,
+                latent,
+                model_name,
+                mode,
+                align,
+                enable_chunking,
+                device,
+                precision,
+            ):
+                calls.append(
+                    (latent, model_name, mode, align, enable_chunking, device, precision)
+                )
                 return FakeNodeOutput({"samples": torch.zeros((1, 24, 2, 4, 8))})
 
         fake_nodes = types.SimpleNamespace(
@@ -223,8 +234,18 @@ class RefineSamplingTest(unittest.TestCase):
 
         self.assertIs(result["audio"]["samples"], audio["samples"])
         self.assertEqual(notes, ["128×64", "h3_latent"])
-        self.assertEqual(calls[0][2], {"mode": "target dimensions", "width": 128, "height": 64})
-        self.assertEqual(calls[0][3:], (32, "cpu", "fp16"))
+        self.assertIs(calls[0][0], video)
+        self.assertEqual(
+            calls[0][1:],
+            (
+                "upscaler.safetensors",
+                {"mode": "target dimensions", "width": 128, "height": 64},
+                32,
+                True,
+                "cpu",
+                "fp16",
+            ),
+        )
 
     def test_strict_refine_raises_instead_of_returning_first_pass(self):
         samples = {"samples": torch.zeros((1, 24, 2, 2, 4))}

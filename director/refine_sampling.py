@@ -369,12 +369,13 @@ def _apply_h3_latent_upscale(
         raise RuntimeError("H3 latent upscaler device=cuda，但 CUDA 不可用。")
     precision = str(pack.get("latent_upscale_precision") or "fp16")
     output = node_class.execute(
-        video_latent,
-        model_name,
-        {"mode": "target dimensions", "width": int(tw), "height": int(th)},
-        32,
-        device,
-        precision,
+        latent=video_latent,
+        model_name=model_name,
+        mode={"mode": "target dimensions", "width": int(tw), "height": int(th)},
+        align=32,
+        enable_chunking=True,
+        device=device,
+        precision=precision,
     )
     encoded = _unpack(output)[0]
     if not isinstance(encoded, dict) or not torch.is_tensor(encoded.get("samples")):
