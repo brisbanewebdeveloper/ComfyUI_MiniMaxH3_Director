@@ -187,12 +187,22 @@ class RefineSamplingTest(unittest.TestCase):
                 model_name,
                 mode,
                 align,
-                enable_chunking,
+                enable_temporal_chunking,
+                force_unload,
                 device,
                 precision,
             ):
                 calls.append(
-                    (latent, model_name, mode, align, enable_chunking, device, precision)
+                    (
+                        latent,
+                        model_name,
+                        mode,
+                        align,
+                        enable_temporal_chunking,
+                        force_unload,
+                        device,
+                        precision,
+                    )
                 )
                 return FakeNodeOutput({"samples": torch.zeros((1, 24, 2, 4, 8))})
 
@@ -241,6 +251,7 @@ class RefineSamplingTest(unittest.TestCase):
                 "upscaler.safetensors",
                 {"mode": "target dimensions", "width": 128, "height": 64},
                 32,
+                True,
                 True,
                 "cpu",
                 "fp16",

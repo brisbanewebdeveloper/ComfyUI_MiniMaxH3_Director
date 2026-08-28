@@ -373,7 +373,8 @@ def _apply_h3_latent_upscale(
         model_name=model_name,
         mode={"mode": "target dimensions", "width": int(tw), "height": int(th)},
         align=32,
-        enable_chunking=True,
+        enable_temporal_chunking=True,
+        force_unload=True,
         device=device,
         precision=precision,
     )
