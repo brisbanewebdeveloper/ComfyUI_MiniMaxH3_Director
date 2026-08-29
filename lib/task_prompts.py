@@ -16,44 +16,44 @@ class TaskPromptSpec:
 TASK_PROMPT_SPECS: tuple[TaskPromptSpec, ...] = (
     TaskPromptSpec(
         "default",
-        "默认通用",
+        "General",
         "",
         "MiniMax H3 使用 Qwen3-VL 自由提示词，无需 T5 系统前缀。",
     ),
     TaskPromptSpec(
         "t2v",
-        "文生视频(Text to Video)",
+        "Text to Video",
         "",
         "文生音视频；无首帧/参考图。",
     ),
     TaskPromptSpec(
         "i2v",
-        "图生视频(Image to Video)",
+        "Image to Video",
         "",
         "首帧图生音视频（ImageToVideo + first_frame）。",
     ),
     TaskPromptSpec(
         "fl2v",
-        "首尾帧生视频(First-Last Frame)",
+        "First-Last Frame to Video",
         "",
         "首帧+尾帧约束（ImageToVideo + first_frame + last_frame）。",
     ),
     TaskPromptSpec(
         "r2v",
-        "参考主体生视频(Reference to Video)",
+        "Reference to Video",
         "",
         "分组参考改视频（类似首尾帧分组）：每组可上传图片1–9、音频1–3、视频1–3；"
         "提示词用 <Picture N> / <Video K> / <Audio J>。源视频时间轴剪辑请用 v2v/rv2v。",
     ),
     TaskPromptSpec(
         "v2v",
-        "视频转视频(Video to Video)",
+        "Video to Video",
         "",
         "上传源视频后按时间轴分段编辑；每段源画面作为 <Video 1> 送入 ReferenceToVideo（无参考图槽）。",
     ),
     TaskPromptSpec(
         "rv2v",
-        "参考素材改视频(Reference Video Edit)",
+        "Reference Video Edit",
         "",
         "源视频时间轴编辑，可选参考图（图片1–9）与参考音频（音频1–3）；"
         "每段源画面为 <Video 1>，参考图用 <Picture N>，参考音频用 <Audio J>；无参考素材时等同 v2v。",
@@ -78,9 +78,10 @@ def task_type_combo_options() -> tuple[list[str], dict]:
     return options, {
         "default": task_type_option_label(default_spec),
         "tooltip": (
-            "MiniMax H3 支持 t2v / i2v / fl2v / r2v / v2v / rv2v。"
-            "提示词直接送入 MiniMaxH3ImageToVideo 或 MiniMaxH3ReferenceToVideo（内部 tokenize）。"
-            "r2v 用 <Picture 1>；v2v/rv2v 为源视频时间轴编辑（自动绑定 <Video 1>）；rv2v 另可挂参考图。"
+            "MiniMax H3 supports t2v / i2v / fl2v / r2v / v2v / rv2v. "
+            "Prompts are sent directly to MiniMaxH3ImageToVideo or MiniMaxH3ReferenceToVideo. "
+            "Use <Picture 1> for r2v; v2v/rv2v bind the source timeline to <Video 1>; "
+            "rv2v can also use reference images."
         ),
     }
 

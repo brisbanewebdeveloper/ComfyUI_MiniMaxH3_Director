@@ -37,7 +37,7 @@ def timeline_required_inputs() -> dict:
                 "tooltip": "Synced from in-node UI (global mode).",
             },
         ),
-        "bd_grp_sample": ("BDGROUP", {"default": "采样设置"}),
+        "bd_grp_sample": ("BDGROUP", {"default": "Sampling settings"}),
         "cfg": (
             "FLOAT",
             {"default": 1.0, "min": 0.0, "max": 30.0, "step": 0.01, "tooltip": "CFG for KSampler."},
@@ -78,19 +78,19 @@ def timeline_required_inputs() -> dict:
 def director_perf_inputs() -> dict:
     """Performance widgets shared by Director nodes."""
     return {
-        "bd_grp_perf": ("BDGROUP", {"default": "性能"}),
+        "bd_grp_perf": ("BDGROUP", {"default": "Performance"}),
         "clear_vram_between_segments": (
             "BOOLEAN",
             {
                 "default": True,
-                "tooltip": "段间清理显存：每段结束后卸载模型并清空 CUDA 缓存。",
+                "tooltip": "Unload models and empty the CUDA cache after each segment.",
             },
         ),
         "export_source_images": (
             "BOOLEAN",
             {
                 "default": False,
-                "tooltip": "输出 source_images（时间轴原片帧对比）。默认关以节省内存。",
+                "tooltip": "Output source_images for timeline source-frame comparison. Disabled by default to save memory.",
             },
         ),
     }

@@ -3,6 +3,7 @@
 import { api } from "../../scripts/api.js";
 import { resolveTaskKey, taskUsesReferenceImages, taskUsesReferenceVideo } from "./minimax_gen_timeline.js";
 import { stripFl2vPromptBody } from "./minimax_fl2v.js";
+import { t } from "./minimax_i18n.js";
 
 export const PE_PANEL_COLLAPSED_H = 34;
 export const PE_PANEL_EXPANDED_H = 348;
@@ -16,10 +17,10 @@ const DEFAULT_API_FORMAT = "Ollama";
 const API_OLLAMA = "Ollama";
 const API_ZHIPU = "智谱 GLM";
 const API_OPENAI_COMPAT = "OpenAI Compatible";
-const OPENAI_COMPAT_STANDARD = "标准";
+const OPENAI_COMPAT_STANDARD = "Standard";
 const OPENAI_COMPAT_LLAMA_SWAP = "llama-swap";
-const DEFAULT_OUTPUT_LANGUAGE = "中文";
-const OUTPUT_LANGUAGE_ZH = "中文";
+const DEFAULT_OUTPUT_LANGUAGE = "Chinese";
+const OUTPUT_LANGUAGE_ZH = "Chinese";
 const CHARACTER_DETAIL_NORMAL = "一般";
 const CHARACTER_DETAIL_DETAILED = "详尽";
 const LEGACY_OPENAI_FORMAT = "OpenAI / vLLM";
@@ -124,8 +125,11 @@ async function fetchImageB64(imageFile) {
 function resolveOutputLanguage(pe) {
     const widgetLang = pe.widget?.("llm_output_language")?.value;
     if (widgetLang) {
-        if (pe.langSelect) pe.langSelect.value = widgetLang;
-        return widgetLang;
+        const normalized = /^(中文|chinese|zh|cn)/i.test(String(widgetLang).trim())
+            ? OUTPUT_LANGUAGE_ZH
+            : "English";
+        if (pe.langSelect) pe.langSelect.value = normalized;
+        return normalized;
     }
     return pe.langSelect?.value || DEFAULT_OUTPUT_LANGUAGE;
 }
@@ -153,13 +157,13 @@ function resolveCharacterFeatureEnhance(pe, { preferWidget = false } = {}) {
 }
 
 function formatEnhanceSuccessStatus(taskKey, result) {
-    let msg = `扩写成功 (${taskKey})，${result.text?.length ?? 0} 字符`;
+    let msg = t("promptEnhancer.success", { task: taskKey, count: result.text?.length ?? 0 });
     if (result.detailedMode) {
         const han = result.hanCount ?? 0;
         const target = result.detailTargetHan ?? 300;
-        msg += `，${han} 汉字（角色特征增强目标≥${target}）`;
+        msg += t("promptEnhancer.hanCount", { count: han, target });
         if (han < target) {
-            msg += "；仍偏短请换更强 Vision 模型或确认参考图已上传";
+            msg += t("promptEnhancer.stillShort");
         }
     }
     return msg;
@@ -181,7 +185,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         pe.statusEl.style.lineHeight = "1.35";
     };
 
-    pe.setEnhanceLoading = (loading, activeBtn = null, label = "扩写中…") => {
+    pe.setEnhanceLoading = (loading, activeBtn = null, label = t("promptEnhancer.enhancing")) => {
         pe._busy = loading;
         pe.enhanceCurrentBtn.disabled = loading;
         pe.enhanceAllBtn.disabled = loading;
@@ -193,8 +197,8 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
             activeBtn.style.cursor = "wait";
             activeBtn.classList.add("minimax-pe-loading");
         } else {
-            pe.enhanceCurrentBtn.textContent = "扩写当前提示词";
-            pe.enhanceAllBtn.textContent = "扩写全部提示词";
+            pe.enhanceCurrentBtn.textContent = t("promptEnhancer.enhanceCurrent");
+            pe.enhanceAllBtn.textContent = t("promptEnhancer.enhanceAll");
             pe.enhanceCurrentBtn.style.background = "#3b82f6";
             pe.enhanceAllBtn.style.background = "#6366f1";
             pe.enhanceCurrentBtn.style.cursor = "pointer";
@@ -209,7 +213,8 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         background: "#1a1d24", border: "1px solid #2a3140", borderRadius: "4px",
         padding: "6px 8px", cursor: "pointer", userSelect: "none", marginTop: "6px",
     });
-    header.appendChild(el({ fontWeight: "600", fontSize: "10px", color: "#9aa3b5", textTransform: "uppercase" }, "LLM 提示词增强 Prompt Enhancer"));
+    pe.titleEl = el({ fontWeight: "600", fontSize: "10px", color: "#9aa3b5", textTransform: "uppercase" }, t("promptEnhancer.title"));
+    header.appendChild(pe.titleEl);
     pe.arrow = el({ fontSize: "10px", color: "#9aa3b5" }, "\u25B6");
     header.appendChild(pe.arrow);
 
@@ -218,8 +223,8 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         borderRadius: "0 0 4px 4px", padding: "8px", display: "none",
         flexDirection: "column", gap: "6px", marginTop: "-5px",
     });
-    pe.body.appendChild(el({ fontSize: "9px", color: "#7d8698", lineHeight: "1.4" },
-        "按 MiniMax H3 官方 task 模板扩写短提示词。「当前」仅扩写选中片段/全局；「全部」在分段模式下依次扩写各片段。"));
+    pe.descriptionEl = el({ fontSize: "9px", color: "#7d8698", lineHeight: "1.4" }, t("promptEnhancer.description"));
+    pe.body.appendChild(pe.descriptionEl);
 
     const fmtRow = el({});
     fmtRow.className = "minimax-pe-api-row";
@@ -228,7 +233,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.apiSelect.className = "minimax-pe-select";
     for (const [val, label] of [
         [API_OLLAMA, "Ollama (/api/chat)"],
-        [API_ZHIPU, "智谱 GLM (/paas/v4/chat)"],
+        [API_ZHIPU, t("promptEnhancer.zhipu")],
         [API_OPENAI_COMPAT, "OpenAI Compatible (/v1/chat/completions)"],
     ]) {
         const o = document.createElement("option");
@@ -258,7 +263,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     };
     fmtRow.appendChild(pe.apiSelect);
     fmtRow.appendChild(pe.urlInput);
-    pe.refreshBtn = el({}, "刷新模型", "button");
+    pe.refreshBtn = el({}, t("promptEnhancer.refreshModels"), "button");
     pe.refreshBtn.className = "minimax-pe-btn-sm";
     pe.refreshBtn.onclick = () => pe.fetchModels();
     fmtRow.appendChild(pe.refreshBtn);
@@ -267,19 +272,21 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.body.appendChild(fmtRow);
 
     const compatRow = el({ display: "none", gap: "6px", alignItems: "center" });
-    compatRow.appendChild(el({}, "OpenAI 特性:", "span")).className = "minimax-pe-label";
+    pe.compatLabel = el({}, t("promptEnhancer.openAiFeatures"), "span");
+    pe.compatLabel.className = "minimax-pe-label";
+    compatRow.appendChild(pe.compatLabel);
     pe.compatSelect = document.createElement("select");
     pe.compatSelect.className = "minimax-pe-select";
     Object.assign(pe.compatSelect.style, { flex: "1" });
     for (const [val, label] of [
-        [OPENAI_COMPAT_STANDARD, "标准"],
+        [OPENAI_COMPAT_STANDARD, t("promptEnhancer.standard")],
         [OPENAI_COMPAT_LLAMA_SWAP, "llama-swap"],
     ]) {
         const o = document.createElement("option");
         o.value = val; o.textContent = label;
         pe.compatSelect.appendChild(o);
     }
-    pe.compatSelect.title = "仅 OpenAI Compatible 生效。选择 llama-swap 后启用 /api/models/unload/{model_id} 卸载接口。";
+    pe.compatSelect.title = t("promptEnhancer.compatTooltip");
     pe.compatSelect.onchange = () => {
         pe.updateApiFormatUI();
         pe.syncToWidgets();
@@ -293,7 +300,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     keyRow.appendChild(el({}, "API Key:", "span")).className = "minimax-pe-label";
     pe.apiKeyInput = document.createElement("input");
     pe.apiKeyInput.type = "password";
-    pe.apiKeyInput.placeholder = "智谱 API Key";
+    pe.apiKeyInput.placeholder = t("promptEnhancer.zhipuKey");
     pe.apiKeyInput.autocomplete = "off";
     pe.apiKeyInput.className = "minimax-pe-input";
     Object.assign(pe.apiKeyInput.style, { flex: "1" });
@@ -304,7 +311,9 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.body.appendChild(keyRow);
 
     const modelRow = el({ display: "flex", gap: "6px", alignItems: "center" });
-    modelRow.appendChild(el({}, "模型:", "span")).className = "minimax-pe-label";
+    pe.modelLabel = el({}, t("promptEnhancer.model"), "span");
+    pe.modelLabel.className = "minimax-pe-label";
+    modelRow.appendChild(pe.modelLabel);
     pe.modelInput = document.createElement("input");
     pe.modelInput.type = "text";
     pe.modelInput.placeholder = DEFAULT_LLM_MODEL;
@@ -320,21 +329,21 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.body.appendChild(modelRow);
 
     const langRow = el({ display: "flex", gap: "6px", alignItems: "center" });
-    langRow.appendChild(el({}, "扩写语言:", "span")).className = "minimax-pe-label";
+    pe.languageLabel = el({}, t("promptEnhancer.outputLanguage"), "span");
+    pe.languageLabel.className = "minimax-pe-label";
+    langRow.appendChild(pe.languageLabel);
     pe.langSelect = document.createElement("select");
     pe.langSelect.className = "minimax-pe-select";
     Object.assign(pe.langSelect.style, { flex: "1" });
     for (const [val, label] of [
-        [OUTPUT_LANGUAGE_ZH, "中文（简体中文）"],
-        ["English", "English（官方推荐）"],
+        [OUTPUT_LANGUAGE_ZH, t("promptEnhancer.chinese")],
+        ["English", t("promptEnhancer.english")],
     ]) {
         const o = document.createElement("option");
         o.value = val; o.textContent = label;
         pe.langSelect.appendChild(o);
     }
-    pe.langSelect.title =
-        "LLM 扩写输出语言。MiniMax H3 官方示例与 T5 系统提示词为英文；"
-        + "选中文时扩写结果为简体中文。";
+    pe.langSelect.title = t("promptEnhancer.languageTooltip");
     pe.langSelect.onchange = () => {
         pe._lastOutputLanguage = pe.langSelect.value || DEFAULT_OUTPUT_LANGUAGE;
         pe.syncToWidgets();
@@ -343,11 +352,6 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     langRow.appendChild(pe.langSelect);
     pe.body.appendChild(langRow);
 
-    const AUTO_ENHANCE_TIP =
-        "Queue 时在服务端自动用 LLM 扩写每段正向提示词（MiniMax H3 官方 task 模板；"
-        + "可附带源视频帧与参考图）。扩写失败则使用原文，不中断生成。"
-        + "多段任务会每段各调用一次 LLM，耗时会增加。";
-
     const optionsRow = el({});
     optionsRow.className = "minimax-pe-options-row";
     const detailItem = el({});
@@ -355,28 +359,27 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.detailCheck = document.createElement("input");
     pe.detailCheck.type = "checkbox";
     pe.detailCheck.checked = false;
-    pe.detailCheck.title =
-        "rv2v/r2v/r2i 等含参考图任务：未勾选时按 MiniMax H3 官方模板扩写；"
-        + "勾选后启用角色特征增强（≥300汉字详尽外观描述）。";
+    pe.detailCheck.title = t("promptEnhancer.detailTooltip");
     pe.detailCheck.onchange = () => pe.syncToWidgets();
     detailItem.appendChild(pe.detailCheck);
-    const detailLabel = el({ cursor: "help" }, "角色特征增强", "span");
-    detailLabel.title = pe.detailCheck.title;
-    detailItem.appendChild(detailLabel);
+    pe.detailLabel = el({ cursor: "help" }, t("promptEnhancer.detail"), "span");
+    pe.detailLabel.title = pe.detailCheck.title;
+    detailItem.appendChild(pe.detailLabel);
     optionsRow.appendChild(detailItem);
 
     const autoItem = el({ cursor: "help" });
     autoItem.className = "minimax-pe-check-item";
-    autoItem.title = AUTO_ENHANCE_TIP;
+    autoItem.title = t("promptEnhancer.autoTooltip");
     pe.autoCheck = document.createElement("input");
     pe.autoCheck.type = "checkbox";
     pe.autoCheck.checked = false;
-    pe.autoCheck.title = AUTO_ENHANCE_TIP;
+    pe.autoCheck.title = autoItem.title;
     pe.autoCheck.onchange = () => pe.syncToWidgets();
     autoItem.appendChild(pe.autoCheck);
-    const autoLabel = el({ cursor: "help" }, "自动扩写", "span");
-    autoLabel.title = AUTO_ENHANCE_TIP;
-    autoItem.appendChild(autoLabel);
+    pe.autoLabel = el({ cursor: "help" }, t("promptEnhancer.auto"), "span");
+    pe.autoLabel.title = autoItem.title;
+    autoItem.appendChild(pe.autoLabel);
+    pe.autoItem = autoItem;
     optionsRow.appendChild(autoItem);
 
     pe.unloadWrap = el({});
@@ -385,7 +388,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.unloadCheck.type = "checkbox";
     pe.unloadCheck.onchange = () => pe.syncToWidgets();
     pe.unloadWrap.appendChild(pe.unloadCheck);
-    pe.unloadCheckLabel = el({}, "用后卸载 Ollama", "span");
+    pe.unloadCheckLabel = el({}, t("promptEnhancer.unloadAfterOllama"), "span");
     pe.unloadWrap.appendChild(pe.unloadCheckLabel);
     optionsRow.appendChild(pe.unloadWrap);
     pe.body.appendChild(optionsRow);
@@ -395,18 +398,18 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.enhanceCurrentBtn = el({
         flex: "1", background: "#3b82f6", color: "#fff", border: "none", borderRadius: "4px",
         padding: "6px", fontWeight: "600", fontSize: "10px", cursor: "pointer",
-    }, "扩写当前提示词", "button");
+    }, t("promptEnhancer.enhanceCurrent"), "button");
     pe.enhanceCurrentBtn.onclick = () => pe.enhancePrompt("current");
     enhanceRow.appendChild(pe.enhanceCurrentBtn);
     pe.enhanceAllBtn = el({
         flex: "1", background: "#6366f1", color: "#fff", border: "none", borderRadius: "4px",
         padding: "6px", fontWeight: "600", fontSize: "10px", cursor: "pointer",
-    }, "扩写全部提示词", "button");
+    }, t("promptEnhancer.enhanceAll"), "button");
     pe.enhanceAllBtn.onclick = () => pe.enhancePrompt("all");
     enhanceRow.appendChild(pe.enhanceAllBtn);
     btnRow.appendChild(enhanceRow);
     const utilRow = el({ display: "flex", gap: "6px" });
-    pe.unloadBtn = el({ background: "#252a34", color: "#e8ecf4", border: "1px solid #2a3140", borderRadius: "4px", padding: "6px 10px", fontSize: "10px", cursor: "pointer" }, "卸载 Ollama", "button");
+    pe.unloadBtn = el({ background: "#252a34", color: "#e8ecf4", border: "1px solid #2a3140", borderRadius: "4px", padding: "6px 10px", fontSize: "10px", cursor: "pointer" }, t("promptEnhancer.unloadOllama"), "button");
     pe.unloadBtn.onclick = () => pe.unloadOllama();
     utilRow.appendChild(pe.unloadBtn);
     pe.unloadBtnRow = utilRow;
@@ -450,15 +453,51 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         if (pe.compatRow) pe.compatRow.style.display = isOpenAi ? "flex" : "none";
         if (pe.keyRow) pe.keyRow.style.display = showKey ? "flex" : "none";
         if (pe.apiKeyInput) {
-            pe.apiKeyInput.placeholder = fmt === API_ZHIPU ? "智谱 API Key" : "OpenAI / llama-swap API Key（可选）";
+            pe.apiKeyInput.placeholder = fmt === API_ZHIPU
+                ? t("promptEnhancer.zhipuKey")
+                : t("promptEnhancer.openAiKey");
         }
         if (pe.unloadWrap) pe.unloadWrap.style.display = supportsUnload ? "flex" : "none";
         if (pe.unloadBtnRow) pe.unloadBtnRow.style.display = supportsUnload ? "flex" : "none";
-        const unloadText = fmt === API_OLLAMA ? "用后卸载 Ollama" : "用后卸载模型 (llama-swap)";
+        const unloadText = fmt === API_OLLAMA
+            ? t("promptEnhancer.unloadAfterOllama")
+            : t("promptEnhancer.unloadAfterModel");
         if (pe.unloadCheckLabel) pe.unloadCheckLabel.textContent = unloadText;
-        if (pe.unloadBtn) pe.unloadBtn.textContent = fmt === API_OLLAMA ? "卸载 Ollama" : "卸载模型 (llama-swap)";
+        if (pe.unloadBtn) {
+            pe.unloadBtn.textContent = fmt === API_OLLAMA
+                ? t("promptEnhancer.unloadOllama")
+                : t("promptEnhancer.unloadModel");
+        }
         pe.urlInput.placeholder = defaultsForApiFormat(fmt).url;
         pe.modelInput.placeholder = defaultsForApiFormat(fmt).model;
+    };
+
+    pe.applyLocale = () => {
+        pe.titleEl.textContent = t("promptEnhancer.title");
+        pe.descriptionEl.textContent = t("promptEnhancer.description");
+        pe.refreshBtn.textContent = t("promptEnhancer.refreshModels");
+        pe.compatLabel.textContent = t("promptEnhancer.openAiFeatures");
+        pe.modelLabel.textContent = t("promptEnhancer.model");
+        pe.languageLabel.textContent = t("promptEnhancer.outputLanguage");
+        pe.compatSelect.title = t("promptEnhancer.compatTooltip");
+        pe.detailCheck.title = t("promptEnhancer.detailTooltip");
+        pe.detailLabel.textContent = t("promptEnhancer.detail");
+        pe.detailLabel.title = pe.detailCheck.title;
+        pe.autoItem.title = t("promptEnhancer.autoTooltip");
+        pe.autoCheck.title = pe.autoItem.title;
+        pe.autoLabel.textContent = t("promptEnhancer.auto");
+        pe.autoLabel.title = pe.autoItem.title;
+        const zhipuOption = [...pe.apiSelect.options].find((option) => option.value === API_ZHIPU);
+        if (zhipuOption) zhipuOption.textContent = t("promptEnhancer.zhipu");
+        const standardOption = [...pe.compatSelect.options].find((option) => option.value === OPENAI_COMPAT_STANDARD);
+        if (standardOption) standardOption.textContent = t("promptEnhancer.standard");
+        const chineseOption = [...pe.langSelect.options].find((option) => option.value === OUTPUT_LANGUAGE_ZH);
+        if (chineseOption) chineseOption.textContent = t("promptEnhancer.chinese");
+        const englishOption = [...pe.langSelect.options].find((option) => option.value === "English");
+        if (englishOption) englishOption.textContent = t("promptEnhancer.english");
+        pe.langSelect.title = t("promptEnhancer.languageTooltip");
+        if (!pe._busy) pe.setEnhanceLoading(false);
+        pe.updateApiFormatUI();
     };
 
     pe.syncFromWidgets = () => {
@@ -512,7 +551,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
             pe.urlInput.value = llmUrl;
             pe.apiSelect.value = inferApiFormat(llmUrl, pe.apiSelect.value);
             pe.updateApiFormatUI();
-            if (!silent) pe.setStatus("正在获取模型列表…", "loading");
+            if (!silent) pe.setStatus(t("promptEnhancer.fetchingModels"), "loading");
             const resp = await api.fetchApi("/minimax/director/enhance_models", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -524,7 +563,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
             });
             const data = await resp.json();
             if (!resp.ok) {
-                if (!silent) pe.setStatus(data.error || "获取模型失败", "error");
+                if (!silent) pe.setStatus(data.error || t("promptEnhancer.fetchModelsFailed"), "error");
                 return;
             }
             pe.modelList.innerHTML = "";
@@ -535,9 +574,9 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
             }
             if (!pe.modelInput.value.trim()) pe.modelInput.value = defaultsForApiFormat(pe.apiSelect.value).model;
             pe.syncToWidgets();
-            if (!silent) pe.setStatus(`${(data.models || []).length} 个模型（可手动输入名称）`, "success");
+            if (!silent) pe.setStatus(t("promptEnhancer.modelCount", { count: (data.models || []).length }), "success");
         } catch (e) {
-            if (!silent) pe.setStatus(`连接失败: ${e.message}`, "error");
+            if (!silent) pe.setStatus(t("promptEnhancer.connectionFailed", { error: e.message }), "error");
         }
     };
 
@@ -719,7 +758,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         return {
             ok: resp.ok && !!data.response,
             text: data.response || "",
-            error: data.error || (resp.ok ? "扩写返回为空" : `HTTP ${resp.status}`),
+            error: data.error || (resp.ok ? t("promptEnhancer.emptyResponse") : `HTTP ${resp.status}`),
             hanCount: data.han_count,
             detailedMode: !!data.detailed_mode,
             detailTargetHan: data.detail_target_han,
@@ -732,7 +771,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         const prompt = pe.getPromptTextForBlock(segmentIndex);
         if (!prompt) return { ok: false, skipped: true, reason: "empty" };
         pe.setEnhanceLoading(true, activeBtn, label);
-        pe.setStatus(`正在扩写: ${label}…`, "loading");
+        pe.setStatus(`${t("promptEnhancer.enhancing")} ${label}`, "loading");
         const result = await pe.callEnhanceApi(prompt, taskKey, block, cfg);
         if (result.ok) {
             const text = taskKey === "fl2v" ? stripFl2vPromptBody(result.text) : result.text;
@@ -745,9 +784,9 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.enhancePrompt = async (scope = "current") => {
         if (pe._busy) return;
         const cfg = pe.getLlmConfig();
-        if (!cfg.model) { pe.setStatus("请输入模型名称", "error"); return; }
+        if (!cfg.model) { pe.setStatus(t("promptEnhancer.enterModel"), "error"); return; }
         if ((cfg.apiFormat === API_ZHIPU) && !cfg.apiKey) {
-            pe.setStatus("请填写 API Key", "error");
+            pe.setStatus(t("promptEnhancer.enterApiKey"), "error");
             return;
         }
 
@@ -755,15 +794,21 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
 
         if (scope === "current") {
             const prompt = pe.getActivePromptText();
-            if (!prompt) { pe.setStatus("请先输入提示词", "error"); return; }
-            pe.setEnhanceLoading(true, activeBtn, "准备中…");
+            if (!prompt) { pe.setStatus(t("promptEnhancer.enterPrompt"), "error"); return; }
+            pe.setEnhanceLoading(true, activeBtn, t("promptEnhancer.preparing"));
             try {
                 const { block, taskKey } = pe.getPromptBlock();
-                pe.setEnhanceLoading(true, activeBtn, "收集素材…");
+                pe.setEnhanceLoading(true, activeBtn, t("promptEnhancer.collectingAssets"));
                 const result = await pe.callEnhanceApi(prompt, taskKey, block, cfg);
                 const v = result.vision || {};
                 if (v.images?.length) {
-                    pe.visionBadge.textContent = `${v.sourceCount ? v.sourceCount + " 视频帧" : ""}${v.sourceCount && v.refCount ? " + " : ""}${v.refCount ? v.refCount + " 参考图" : ""}`;
+                    const sourceLabel = v.sourceCount
+                        ? t("promptEnhancer.videoFrames", { count: v.sourceCount })
+                        : "";
+                    const refLabel = v.refCount
+                        ? t("promptEnhancer.referenceImages", { count: v.refCount })
+                        : "";
+                    pe.visionBadge.textContent = `${sourceLabel}${sourceLabel && refLabel ? " + " : ""}${refLabel}`;
                     pe.visionBadge.style.display = "inline";
                 } else {
                     pe.visionBadge.style.display = "none";
@@ -776,7 +821,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
                     pe.setStatus(result.error, "error");
                 }
             } catch (e) {
-                pe.setStatus(`请求失败: ${e.message}`, "error");
+                pe.setStatus(t("promptEnhancer.requestFailed", { error: e.message }), "error");
             } finally {
                 pe.setEnhanceLoading(false);
             }
@@ -786,17 +831,17 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         // scope === "all"
         if (editor.isGlobalMode?.()) {
             const prompt = pe.getActivePromptText();
-            if (!prompt) { pe.setStatus("请先输入全局提示词", "error"); return; }
+            if (!prompt) { pe.setStatus(t("promptEnhancer.enterGlobalPrompt"), "error"); return; }
             try {
-                const r = await pe.enhanceOneTarget(null, cfg, activeBtn, "全局提示词");
+                const r = await pe.enhanceOneTarget(null, cfg, activeBtn, t("promptEnhancer.globalPrompt"));
                 if (r.ok) {
                     editor.commit?.(false, { syncTimeline: true });
                     pe.setStatus(formatEnhanceSuccessStatus(r.taskKey, r.result || {}), "success");
                 } else if (!r.skipped) {
-                    pe.setStatus(r.error || "扩写失败", "error");
+                    pe.setStatus(r.error || t("promptEnhancer.enhanceFailed"), "error");
                 }
             } catch (e) {
-                pe.setStatus(`请求失败: ${e.message}`, "error");
+                pe.setStatus(t("promptEnhancer.requestFailed", { error: e.message }), "error");
             } finally {
                 pe.setEnhanceLoading(false);
             }
@@ -806,7 +851,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         const segments = editor.timeline.segments || [];
         const targets = segments.map((_, i) => i).filter((i) => pe.getPromptTextForBlock(i));
         if (!targets.length) {
-            pe.setStatus("没有可扩写的分段提示词（请先填写各片段或全局提示词）", "error");
+            pe.setStatus(t("promptEnhancer.noSegmentPrompts"), "error");
             return;
         }
 
@@ -815,26 +860,26 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         try {
             for (let n = 0; n < targets.length; n++) {
                 const idx = targets[n];
-                const label = `片段 ${idx + 1}/${segments.length}`;
+                const label = t("promptEnhancer.segment", { index: idx + 1, total: segments.length });
                 const r = await pe.enhanceOneTarget(idx, cfg, activeBtn, label);
                 if (r.ok) {
                     okCount += 1;
-                    pe.setStatus(`${label} 扩写成功 (${okCount}/${targets.length})`, "loading");
+                    pe.setStatus(t("promptEnhancer.segmentSuccess", { label, done: okCount, total: targets.length }), "loading");
                 } else if (!r.skipped) {
-                    lastError = r.error || "未知错误";
-                    pe.setStatus(`${label} 失败: ${lastError}`, "error");
+                    lastError = r.error || t("promptEnhancer.unknownError");
+                    pe.setStatus(t("promptEnhancer.segmentFailed", { label, error: lastError }), "error");
                     break;
                 }
             }
             editor.commit?.(false, { syncTimeline: true });
             editor.updateSelectionUI?.();
             if (okCount === targets.length) {
-                pe.setStatus(`全部扩写完成：${okCount} 个分段`, "success");
+                pe.setStatus(t("promptEnhancer.allDone", { count: okCount }), "success");
             } else if (okCount > 0 && lastError) {
-                pe.setStatus(`部分完成：${okCount}/${targets.length} 成功；失败: ${lastError}`, "error");
+                pe.setStatus(t("promptEnhancer.partialDone", { done: okCount, total: targets.length, error: lastError }), "error");
             }
         } catch (e) {
-            pe.setStatus(`请求失败: ${e.message}`, "error");
+            pe.setStatus(t("promptEnhancer.requestFailed", { error: e.message }), "error");
         } finally {
             pe.setEnhanceLoading(false);
         }
@@ -845,12 +890,12 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         const apiFormat = pe.apiSelect.value;
         const openaiCompatMode = normalizeOpenAiCompatMode(pe.compatSelect?.value);
         const model = coerceLlmModel(pe.modelInput.value);
-        if (!model) { pe.setStatus("请输入模型名称", "error"); return; }
+        if (!model) { pe.setStatus(t("promptEnhancer.enterModel"), "error"); return; }
         if (!pe.supportsUnload()) {
-            pe.setStatus("当前 API 格式不支持手动卸载模型", "error");
+            pe.setStatus(t("promptEnhancer.unsupportedUnload"), "error");
             return;
         }
-        pe.setStatus("正在卸载模型…", "loading");
+        pe.setStatus(t("promptEnhancer.unloading"), "loading");
         try {
             const resp = await api.fetchApi("/minimax/director/unload_model", {
                 method: "POST",
@@ -865,12 +910,12 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
             });
             const data = await resp.json();
             if (resp.ok && data.status === "unloaded") {
-                pe.setStatus(`${data.provider || "LLM"} 模型已卸载`, "success");
+                pe.setStatus(t("promptEnhancer.modelUnloaded", { provider: data.provider || "LLM" }), "success");
             } else {
-                pe.setStatus(data.error || "卸载失败", "error");
+                pe.setStatus(data.error || t("promptEnhancer.unloadFailed", { error: t("promptEnhancer.unknownError") }), "error");
             }
         } catch (e) {
-            pe.setStatus(`卸载失败: ${e.message}`, "error");
+            pe.setStatus(t("promptEnhancer.unloadFailed", { error: e.message }), "error");
         }
     };
     pe.unloadOllama = pe.unloadModel;
@@ -883,12 +928,13 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
             text = stripFl2vPromptBody(text);
         }
         pe.setActivePromptText(text);
-        pe.setStatus(`自动扩写已应用（${text.length} 字符）`, "success");
+        pe.setStatus(t("promptEnhancer.autoApplied", { count: text.length }), "success");
     };
 
     pe._lastOutputLanguage = null;
     pe.syncFromWidgets();
     editor._promptEnhancer = pe;
+    pe.applyLocale();
     pe.fetchTemplate(true);
     return pe;
 }

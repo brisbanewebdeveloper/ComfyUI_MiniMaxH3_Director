@@ -126,7 +126,7 @@ class MiniMaxH3Director:
                         ),
                     },
                 ),
-                "bd_grp_advanced": ("BDGROUP", {"default": "高级采样"}),
+                "bd_grp_advanced": ("BDGROUP", {"default": "Advanced sampling"}),
                 "steps": (
                     "INT",
                     {

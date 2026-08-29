@@ -5446,6 +5446,7 @@ class MiniMaxH3DirectorEditor {
         this.root?.classList.toggle("locale-en", getLocale() === "en");
         this.root?.classList.toggle("locale-zh", getLocale() !== "en");
         applyI18nDom(this.root);
+        this._promptEnhancer?.applyLocale?.();
         applyDirectorWidgetLabels(this.node);
         this.populateTaskSelect(this.globalTask, this.taskTypeWidget?.value || this.globalTask?.value);
         this.refreshAspectSelectLabels();
@@ -10822,6 +10823,44 @@ function isAdvancedDirectorNode(node) {
     return cls === "MiniMaxH3DirectorAdvanced";
 }
 
+const ENGLISH_TASK_TYPE_LABELS = {
+    t2v: "t2v — Text to Video",
+    i2v: "i2v — Image to Video",
+    fl2v: "fl2v — First-Last Frame to Video",
+    r2v: "r2v — Reference to Video",
+    v2v: "v2v — Video to Video",
+    rv2v: "rv2v — Reference Video Edit",
+};
+
+function normalizeEnglishComboValue(name, value) {
+    if (name === "task_type") {
+        return ENGLISH_TASK_TYPE_LABELS[resolveTaskKey(value)] || value;
+    }
+    if (name === "openai_compat_mode") {
+        return String(value || "").trim().toLowerCase() === "llama-swap" ? "llama-swap" : "Standard";
+    }
+    if (name === "output_language") {
+        return /^(中文|chinese|zh|cn)/i.test(String(value || "").trim()) ? "Chinese" : "English";
+    }
+    return value;
+}
+
+function migrateEnglishWidgetValues(node, config) {
+    if (!Array.isArray(config?.widgets_values) || !Array.isArray(node?.widgets)) return false;
+    let migrated = false;
+    for (const name of ["task_type", "openai_compat_mode", "output_language"]) {
+        const index = node.widgets.findIndex((widget) => widget.name === name);
+        if (index < 0 || index >= config.widgets_values.length) continue;
+        const current = config.widgets_values[index];
+        const normalized = normalizeEnglishComboValue(name, current);
+        if (normalized !== current) {
+            config.widgets_values[index] = normalized;
+            migrated = true;
+        }
+    }
+    return migrated;
+}
+
 function migrateAdvancedWidgetValues(node, config) {
     if (!isAdvancedDirectorNode(node) || !Array.isArray(config?.widgets_values)) return false;
     const firstIndex = node.widgets?.findIndex((widget) => widget.name === "enable_firstblock_cache") ?? -1;
@@ -11045,6 +11084,17 @@ app.registerExtension({
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         const cls = nodeType?.comfyClass || nodeData?.name || "";
+        if (cls === "MiniMaxH3DirectorEnhancePrompt") {
+            const onConfigure = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function () {
+                const config = arguments[0];
+                const migrated = migrateEnglishWidgetValues(this, config);
+                const out = onConfigure?.apply(this, arguments);
+                if (migrated) applyConfiguredWidgetValues(this, config.widgets_values);
+                return out;
+            };
+            return;
+        }
         if (EXTERNAL_GROUP_NODE_TYPES.has(cls) || cls === EXTERNAL_COMBINE_NODE_TYPE) {
             const onConnectionsChange = nodeType.prototype.onConnectionsChange;
             nodeType.prototype.onConnectionsChange = function (...args) {
@@ -11175,7 +11225,9 @@ app.registerExtension({
         nodeType.prototype.onConfigure = function () {
             normalizeDirectorOutputs(this);
             const config = arguments[0];
-            const migrated = migrateAdvancedWidgetValues(this, config);
+            const advancedMigrated = migrateAdvancedWidgetValues(this, config);
+            const englishMigrated = migrateEnglishWidgetValues(this, config);
+            const migrated = advancedMigrated || englishMigrated;
             const out = onConfigure?.apply(this, arguments);
             if (migrated) applyConfiguredWidgetValues(this, config.widgets_values);
             setTimeout(() => {

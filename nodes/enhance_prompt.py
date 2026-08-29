@@ -13,7 +13,7 @@ from ..lib.prompt_enhancer import (
     OPENAI_COMPAT_MODE_STANDARD,
     enhance_prompt_sync,
 )
-from ..lib.task_prompts import task_type_combo_options
+from ..lib.task_prompts import TASK_PROMPT_BY_KEY, resolve_task_key, task_type_combo_options
 
 
 class MiniMaxH3DirectorEnhancePrompt:
@@ -52,6 +52,29 @@ class MiniMaxH3DirectorEnhancePrompt:
     FUNCTION = "enhance"
     CATEGORY = "MiniMaxH3"
     DESCRIPTION = "Enhance a MiniMax H3 prompt with local Ollama or an unauthenticated OpenAI-compatible endpoint."
+
+    @classmethod
+    def VALIDATE_INPUTS(
+        cls,
+        task_type: str,
+        openai_compat_mode: str = OPENAI_COMPAT_MODE_STANDARD,
+        output_language: str = OUTPUT_LANGUAGE_EN,
+    ) -> bool | str:
+        if resolve_task_key(task_type) not in TASK_PROMPT_BY_KEY:
+            return f"Unsupported MiniMax H3 task type: {task_type}."
+        if str(openai_compat_mode).strip().lower() not in {"standard", "标准", OPENAI_COMPAT_MODE_LLAMA_SWAP}:
+            return f"Unsupported OpenAI compatibility mode: {openai_compat_mode}."
+        if str(output_language).strip().lower() not in {
+            "english",
+            "chinese",
+            "chinese (simplified)",
+            "zh",
+            "cn",
+            "中文",
+            "简体中文",
+        }:
+            return f"Unsupported prompt output language: {output_language}."
+        return True
 
     def enhance(
         self,
