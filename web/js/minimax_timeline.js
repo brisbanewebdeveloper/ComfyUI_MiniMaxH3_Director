@@ -11175,6 +11175,18 @@ app.registerExtension({
 
         if (!isDirectorNodeDef(nodeType, nodeData)) return;
 
+        const configure = nodeType.prototype.configure;
+        nodeType.prototype.configure = function () {
+            const config = arguments[0];
+            const migrated = isAdvancedDirectorNode(this)
+                ? migrateAdvancedWidgetValues(this, config)
+                : false;
+            const migratedValues = migrated ? config.widgets_values.slice() : null;
+            const out = configure?.apply(this, arguments);
+            if (migrated) applyConfiguredWidgetValues(this, migratedValues);
+            return out;
+        };
+
         const onCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const r = onCreated?.apply(this, arguments);
@@ -11272,11 +11284,9 @@ app.registerExtension({
         nodeType.prototype.onConfigure = function () {
             normalizeDirectorOutputs(this);
             const config = arguments[0];
-            const advancedMigrated = migrateAdvancedWidgetValues(this, config);
             const englishMigrated = migrateEnglishWidgetValues(this, config);
-            const migrated = advancedMigrated || englishMigrated;
             const out = onConfigure?.apply(this, arguments);
-            if (migrated) applyConfiguredWidgetValues(this, config.widgets_values);
+            if (englishMigrated) applyConfiguredWidgetValues(this, config.widgets_values);
             setTimeout(() => {
                 finalizeDirectorWidgetOrder(this);
                 const ed = initDirectorEditor(this) || this._minimaxEditor;
