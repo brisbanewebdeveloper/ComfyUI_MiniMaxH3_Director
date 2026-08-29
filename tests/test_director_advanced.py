@@ -25,7 +25,14 @@ def load_advanced_module():
     class BaseDirector:
         @classmethod
         def INPUT_TYPES(cls):
-            return {"required": {}, "optional": {"shift_video": ("FLOAT", {}), "shift_audio": ("FLOAT", {})}}
+            return {
+                "required": {},
+                "optional": {
+                    "shift_video": ("FLOAT", {}),
+                    "shift_audio": ("FLOAT", {}),
+                    "sigmas": ("SIGMAS", {}),
+                },
+            }
 
         def execute(self, **kwargs):
             provider = kwargs.get("_segment_model_provider")
@@ -132,6 +139,7 @@ class AdvancedDirectorTest(unittest.TestCase):
 
         self.assertIn("shift_video", optional)
         self.assertIn("shift_audio", optional)
+        self.assertIn("sigmas", optional)
         self.assertNotIn("enable_model_sampling", optional)
         self.assertEqual(optional["enable_firstblock_cache"][1]["default"], False)
         self.assertEqual(optional["firstblock_cache_threshold"][1]["default"], 0.08)
@@ -150,11 +158,13 @@ class AdvancedDirectorTest(unittest.TestCase):
             clip="clip",
             shift_video=12,
             shift_audio=3,
+            sigmas="pdd-sigmas",
         )
 
         self.assertEqual(result["model"], "base")
         self.assertEqual(result["shift_video"], 12)
         self.assertEqual(result["shift_audio"], 3)
+        self.assertEqual(result["sigmas"], "pdd-sigmas")
         self.assertEqual(self.calls, [("director", "base")])
 
     def test_enabled_enhancements_apply_in_model_preparation_order(self):

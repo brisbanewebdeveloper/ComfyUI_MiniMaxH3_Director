@@ -126,6 +126,16 @@ class MiniMaxH3Director:
                         ),
                     },
                 ),
+                "sigmas": (
+                    "SIGMAS",
+                    {
+                        "forceInput": True,
+                        "tooltip": (
+                            "Optional first-pass noise schedule. Connect the SIGMAS output from "
+                            "MiniMax H3 PDD Acc when using an acceleration adapter."
+                        ),
+                    },
+                ),
                 "bd_grp_advanced": ("BDGROUP", {"default": "Advanced sampling"}),
                 "steps": (
                     "INT",
@@ -233,6 +243,7 @@ class MiniMaxH3Director:
         i2v_groups=None,
         r2v_groups=None,
         refine=None,
+        sigmas=None,
         steps=25,
         sampler="res_multistep",
         scheduler="simple",
@@ -285,6 +296,7 @@ class MiniMaxH3Director:
                 shift_audio=shift_audio,
                 clear_vram_between_segments=clear_vram_between_segments,
                 segment_model_provider=routed_model_provider,
+                sigmas=sigmas,
             )
         )
 

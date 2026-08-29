@@ -259,6 +259,7 @@ def execute_director_plan_core(
     shift_audio: float = 3.0,
     clear_vram_between_segments: bool = True,
     segment_model_provider: Callable[[Any, Any], Any] | None = None,
+    sigmas=None,
 ) -> tuple[
     torch.Tensor,
     list[torch.Tensor],
@@ -827,6 +828,7 @@ def execute_director_plan_core(
             on_phase=_report_sample_phase,
             on_step_preview=_report_step_preview if live_tae_preview else None,
             preview_every=live_preview_every,
+            sigmas=sigmas,
         )
 
         first_pass_gpu = None
