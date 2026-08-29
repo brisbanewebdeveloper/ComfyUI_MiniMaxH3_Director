@@ -10868,9 +10868,51 @@ function migrateAdvancedWidgetValues(node, config) {
 
     const values = config.widgets_values;
     const widgetCount = node.widgets.length;
+    const stepsIndex = node.widgets.findIndex((widget) => widget.name === "steps");
+    const samplerIndex = node.widgets.findIndex((widget) => widget.name === "sampler");
+    const schedulerIndex = node.widgets.findIndex((widget) => widget.name === "scheduler");
+    const shiftVideoIndex = node.widgets.findIndex((widget) => widget.name === "shift_video");
+    const shiftAudioIndex = node.widgets.findIndex((widget) => widget.name === "shift_audio");
+    const loraIndex = node.widgets.findIndex((widget) => widget.name === "lora_config");
+    const perfIndex = node.widgets.findIndex((widget) => widget.name === "bd_grp_perf");
     const cfgIndex = firstIndex + 3;
     const firstBlockDefaults = [false, 0.08, false];
     const cfgNormDefaults = [false, 0.95, false];
+    const samplingDefaults = [25, "res_multistep", "simple", 12, 3];
+    let migrated = false;
+
+    const isLoraConfig = (value) => {
+        if (typeof value !== "string") return false;
+        try {
+            return Array.isArray(JSON.parse(value));
+        } catch {
+            return false;
+        }
+    };
+    const hasSampling = () => stepsIndex >= 0
+        && samplerIndex === stepsIndex + 1
+        && schedulerIndex === stepsIndex + 2
+        && shiftVideoIndex === stepsIndex + 3
+        && shiftAudioIndex === stepsIndex + 4
+        && typeof values[stepsIndex] === "number"
+        && Number.isFinite(values[stepsIndex])
+        && typeof values[samplerIndex] === "string"
+        && typeof values[schedulerIndex] === "string"
+        && typeof values[shiftVideoIndex] === "number"
+        && Number.isFinite(values[shiftVideoIndex])
+        && typeof values[shiftAudioIndex] === "number"
+        && Number.isFinite(values[shiftAudioIndex]);
+
+    // Older Advanced arrays either omitted the five base sampling widgets or
+    // omitted lora_config. Recover the stable values around those gaps.
+    if (stepsIndex >= 0 && loraIndex >= 0 && !hasSampling() && isLoraConfig(values[stepsIndex])) {
+        values.splice(stepsIndex, 0, ...samplingDefaults);
+        migrated = true;
+    } else if (loraIndex >= 0 && hasSampling() && !isLoraConfig(values[loraIndex])) {
+        values.splice(loraIndex, 0, "[]");
+        migrated = true;
+    }
+
     const hasFirstBlockCache = () => typeof values[firstIndex] === "boolean"
         && typeof values[firstIndex + 1] === "number"
         && Number.isFinite(values[firstIndex + 1])
@@ -10882,7 +10924,7 @@ function migrateAdvancedWidgetValues(node, config) {
 
     if (values.length === widgetCount - 6) {
         values.splice(firstIndex, 0, ...firstBlockDefaults, ...cfgNormDefaults);
-        return true;
+        migrated = true;
     }
     if (values.length === widgetCount - 3) {
         if (hasFirstBlockCache()) {
@@ -10890,11 +10932,10 @@ function migrateAdvancedWidgetValues(node, config) {
         } else {
             values.splice(firstIndex, 0, ...firstBlockDefaults);
         }
-        return true;
+        migrated = true;
     }
-    if (values.length !== widgetCount) return false;
+    if (values.length !== widgetCount && !migrated) return false;
 
-    let migrated = false;
     if (!hasFirstBlockCache()) {
         values.splice(firstIndex, 3, ...firstBlockDefaults);
         migrated = true;
@@ -10902,6 +10943,12 @@ function migrateAdvancedWidgetValues(node, config) {
     if (!hasCfgNorm()) {
         values.splice(cfgIndex, 3, ...cfgNormDefaults);
         migrated = true;
+    }
+
+    if (migrated && perfIndex >= 0) {
+        // Legacy arrays can contain duplicate Performance labels where the
+        // trailing group was appended. Keep the canonical typed tail.
+        values.splice(perfIndex, Math.max(0, values.length - perfIndex), "Performance", true, false, "");
     }
     return migrated;
 }
