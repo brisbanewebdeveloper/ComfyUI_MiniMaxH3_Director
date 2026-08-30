@@ -10879,6 +10879,11 @@ function migrateAdvancedWidgetValues(node, config) {
     const firstBlockDefaults = [false, 0.08, false];
     const cfgNormDefaults = [false, 0.95, false];
     const samplingDefaults = [25, "res_multistep", "simple", 12, 3];
+    const sageAttentionModes = [
+        "auto", "sageattn_qk_int8_pv_fp16_cuda", "sageattn_qk_int8_pv_fp16_triton",
+        "sageattn_qk_int8_pv_fp8_cuda", "sageattn_qk_int8_pv_fp8_cuda++", "sageattn3",
+        "sageattn3_per_block_mean",
+    ];
     let migrated = false;
 
     const legacyEnhancementShifted = () => {
@@ -10886,14 +10891,18 @@ function migrateAdvancedWidgetValues(node, config) {
         return loraIndex >= 0
             && typeof values[start] === "boolean"
             && typeof values[start + 1] === "boolean"
-            && typeof values[start + 2] === "boolean"
-            && typeof values[start + 3] === "number"
-            && typeof values[start + 8] === "string"
-            && typeof values[start + 9] === "boolean"
-            && typeof values[start + 10] === "string"
-            && typeof values[start + 11] === "boolean"
+            && sageAttentionModes.includes(values[start + 2])
+            && typeof values[start + 3] === "boolean"
+            && typeof values[start + 4] === "boolean"
+            && typeof values[start + 5] === "boolean"
+            && typeof values[start + 6] === "number"
+            && typeof values[start + 9] === "number"
+            && typeof values[start + 10] === "boolean"
+            && typeof values[start + 11] === "string"
             && typeof values[start + 12] === "boolean"
-            && typeof values[start + 14] === "string";
+            && typeof values[start + 13] === "string"
+            && typeof values[start + 14] === "boolean"
+            && typeof values[start + 17] === "string";
     };
 
     const isLoraConfig = (value) => {
@@ -10979,23 +10988,25 @@ function migrateAdvancedWidgetValues(node, config) {
         const string = (value, fallback) => typeof value === "string" ? value : fallback;
         const repaired = [
             // The removed model-sampling toggle is deliberately discarded.
-            bool(legacy[1], false), "auto", bool(legacy[2], false), false, false,
-            number(legacy[3], 1.3, 0, 4),
-            number(legacy[4], 0.2, 0, 1),
-            number(legacy[5], 0.9, 0, 1),
-            number(legacy[6], 4096, 0, 1 << 20),
-            bool(legacy[7], true),
-            ["exact_kv", "exact_kv_and_rows", "off"].includes(legacy[8])
-                ? legacy[8] : "exact_kv_and_rows",
-            bool(legacy[9], false),
-            ["3d", "2d_frame"].includes(legacy[10]) ? legacy[10] : "2d_frame",
-            bool(legacy[11], true), bool(legacy[12], false), bool(legacy[13], false),
-            string(legacy[14], ""), string(legacy[15], ""),
-            bool(legacy[16], false),
-            number(legacy[17], 0.2, 0, 3),
-            number(legacy[18], 0.15, 0, 1),
-            number(legacy[19], 0.95, 0, 1),
-            bool(legacy[20], false),
+            bool(legacy[1], false),
+            sageAttentionModes.includes(legacy[2]) ? legacy[2] : "auto",
+            bool(legacy[3], false), bool(legacy[4], false), bool(legacy[5], false),
+            number(legacy[6], 1.3, 0, 4),
+            number(legacy[7], 0.2, 0, 1),
+            number(legacy[8], 0.9, 0, 1),
+            number(legacy[9], 4096, 0, 1 << 20),
+            bool(legacy[10], true),
+            ["exact_kv", "exact_kv_and_rows", "off"].includes(legacy[11])
+                ? legacy[11] : "exact_kv_and_rows",
+            bool(legacy[12], false),
+            ["3d", "2d_frame"].includes(legacy[13]) ? legacy[13] : "2d_frame",
+            bool(legacy[14], true), bool(legacy[15], false), bool(legacy[16], false),
+            string(legacy[17], ""), string(legacy[18], ""),
+            bool(legacy[19], false),
+            number(legacy[20], 0.2, 0, 3),
+            number(legacy[21], 0.15, 0, 1),
+            number(legacy[22], 0.95, 0, 1),
+            bool(legacy[23], false),
         ];
         values.splice(start, firstIndex - start, ...repaired);
         migrated = true;

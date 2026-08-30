@@ -65,14 +65,15 @@ test("repairs the legacy model-enhancement value shift", () => {
     const loraIndex = node.widgets.findIndex((widget) => widget.name === "lora_config");
     const firstIndex = node.widgets.findIndex((widget) => widget.name === "enable_firstblock_cache");
     values.splice(loraIndex + 1, firstIndex - loraIndex - 1,
-        false, true, false, 1.3, 0.2, 0.9, 4096, true, "exact_kv_and_rows", false,
-        "2d_frame", true, false, false, "", "", false, 0.2, 0.15, 0.95, false, false, false);
+        true, false, "sageattn3", false, false, false, 1.3, 0.2, 0.9, 4096, true,
+        "exact_kv_and_rows", false, "2d_frame", true, false, false, "", "", false,
+        0.2, 0.15, 0.95);
     const config = { widgets_values: values };
 
     assert.equal(migrateAdvancedWidgetValues(node, config), true);
     const repaired = config.widgets_values;
-    assert.equal(repaired[node.widgets.findIndex((widget) => widget.name === "enable_sage_attention")], true);
-    assert.equal(repaired[node.widgets.findIndex((widget) => widget.name === "sage_attention")], "auto");
+    assert.equal(repaired[node.widgets.findIndex((widget) => widget.name === "enable_sage_attention")], false);
+    assert.equal(repaired[node.widgets.findIndex((widget) => widget.name === "sage_attention")], "sageattn3");
     assert.equal(repaired[node.widgets.findIndex((widget) => widget.name === "sol_min_tokens")], 4096);
     assert.equal(repaired[node.widgets.findIndex((widget) => widget.name === "sol_sink_conditioning")], "exact_kv_and_rows");
     assert.deepEqual(repaired.slice(-4), ["Performance", true, false, ""]);
