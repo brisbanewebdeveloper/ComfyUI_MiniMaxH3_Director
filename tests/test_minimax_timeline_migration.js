@@ -11,9 +11,19 @@ const migrations = Function(`
         return String(value || "").split(/ — | —— | - | – /, 1)[0].trim();
     }
     ${source.slice(start, end)}
-    return { migrateAdvancedWidgetValues, migrateEnglishWidgetValues, restoreNamedWidgetValues };
+    return {
+        migrateAdvancedWidgetValues,
+        migrateEnglishWidgetValues,
+        restoreNamedWidgetValues,
+        applyRecoveredAdvancedWidgetValues,
+    };
 `)();
-const { migrateAdvancedWidgetValues, migrateEnglishWidgetValues, restoreNamedWidgetValues } = migrations;
+const {
+    migrateAdvancedWidgetValues,
+    migrateEnglishWidgetValues,
+    restoreNamedWidgetValues,
+    applyRecoveredAdvancedWidgetValues,
+} = migrations;
 
 function makeNode(widgetCount = 10) {
     const names = ["base_a", "base_b", "enable_firstblock_cache", "firstblock_cache_threshold", "firstblock_cache_verbose", "enable_cfg_norm", "cfg_norm_strength", "cfg_norm_pre_cfg"];
@@ -153,6 +163,17 @@ test("ignores a named map with invalid sampling values", () => {
 
     assert.equal(restoreNamedWidgetValues(node, { steps: "euler" }), false);
     assert.equal(node.widgets.every((widget) => widget.value === undefined), true);
+});
+
+test("applies recovered sampling and performance values by widget name", () => {
+    const node = makeCurrentAdvancedNode();
+    const values = makeCurrentAdvancedValues(node);
+
+    applyRecoveredAdvancedWidgetValues(node, values);
+    assert.equal(node.widgets.find((widget) => widget.name === "steps").value, 4);
+    assert.equal(node.widgets.find((widget) => widget.name === "shift_audio").value, 3);
+    assert.equal(node.widgets.find((widget) => widget.name === "clear_vram_between_segments").value, true);
+    assert.equal(node.widgets.find((widget) => widget.name === "export_source_images").value, false);
 });
 
 test("rewrites legacy Director task labels in English", () => {

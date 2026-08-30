@@ -10979,6 +10979,28 @@ function restoreNamedWidgetValues(node, namedValues) {
     return restored;
 }
 
+function applyRecoveredAdvancedWidgetValues(node, values) {
+    const samplingNames = ["steps", "sampler", "scheduler", "shift_video", "shift_audio"];
+    const samplingIndex = node?.widgets?.findIndex((widget) => widget.name === "steps") ?? -1;
+    if (samplingIndex >= 0) {
+        const sampling = values.slice(samplingIndex, samplingIndex + samplingNames.length);
+        if (typeof sampling[0] === "number" && Number.isFinite(sampling[0])
+            && typeof sampling[1] === "string" && typeof sampling[2] === "string"
+            && typeof sampling[3] === "number" && Number.isFinite(sampling[3])
+            && typeof sampling[4] === "number" && Number.isFinite(sampling[4])) {
+            samplingNames.forEach((name, index) => {
+                node.widgets.find((widget) => widget.name === name).value = sampling[index];
+            });
+        }
+    }
+    const tail = values.slice(-4);
+    ["bd_grp_perf", "clear_vram_between_segments", "export_source_images", "minimax_director_ui"]
+        .forEach((name, index) => {
+            const widget = node?.widgets?.find((candidate) => candidate.name === name);
+            if (widget && index < tail.length) widget.value = tail[index];
+        });
+}
+
 function applyConfiguredWidgetValues(node, values) {
     if (!Array.isArray(values)) return;
     for (let index = 0; index < values.length && index < node.widgets.length; index++) {
@@ -11210,7 +11232,10 @@ app.registerExtension({
             const migratedValues = migrated ? config.widgets_values.slice() : null;
             const namedValues = isAdvancedDirectorNode(this) ? config?.widgets_values_named : null;
             const out = configure?.apply(this, arguments);
-            if (migrated) applyConfiguredWidgetValues(this, migratedValues);
+            if (migrated) {
+                applyConfiguredWidgetValues(this, migratedValues);
+                if (isAdvancedDirectorNode(this)) applyRecoveredAdvancedWidgetValues(this, migratedValues);
+            }
             if (namedValues) restoreNamedWidgetValues(this, namedValues);
             return out;
         };
