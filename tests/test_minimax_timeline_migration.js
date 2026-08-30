@@ -59,6 +59,25 @@ test("leaves current valid widget values unchanged", () => {
     assert.deepEqual(config.widgets_values, original);
 });
 
+test("repairs the legacy model-enhancement value shift", () => {
+    const node = makeCurrentAdvancedNode();
+    const values = makeCurrentAdvancedValues(node);
+    const loraIndex = node.widgets.findIndex((widget) => widget.name === "lora_config");
+    const firstIndex = node.widgets.findIndex((widget) => widget.name === "enable_firstblock_cache");
+    values.splice(loraIndex + 1, firstIndex - loraIndex - 1,
+        false, true, false, 1.3, 0.2, 0.9, 4096, true, "exact_kv_and_rows", false,
+        "2d_frame", true, false, false, "", "", false, 0.2, 0.15, 0.95, false, false, false);
+    const config = { widgets_values: values };
+
+    assert.equal(migrateAdvancedWidgetValues(node, config), true);
+    const repaired = config.widgets_values;
+    assert.equal(repaired[node.widgets.findIndex((widget) => widget.name === "enable_sage_attention")], true);
+    assert.equal(repaired[node.widgets.findIndex((widget) => widget.name === "sage_attention")], "auto");
+    assert.equal(repaired[node.widgets.findIndex((widget) => widget.name === "sol_min_tokens")], 4096);
+    assert.equal(repaired[node.widgets.findIndex((widget) => widget.name === "sol_sink_conditioning")], "exact_kv_and_rows");
+    assert.deepEqual(repaired.slice(-4), ["Performance", true, false, ""]);
+});
+
 function makeCurrentAdvancedNode() {
     const names = [
         "task_type", "global_prompt", "bd_grp_sample", "cfg", "seed", "control_after_generate",
@@ -162,6 +181,22 @@ test("ignores a named map with invalid sampling values", () => {
     const node = makeCurrentAdvancedNode();
 
     assert.equal(restoreNamedWidgetValues(node, { steps: "euler" }), false);
+    assert.equal(node.widgets.every((widget) => widget.value === undefined), true);
+});
+
+test("rejects a named map with shifted enhancement values", () => {
+    const node = makeCurrentAdvancedNode();
+    const namedValues = {
+        steps: 8,
+        sampler: "euler",
+        scheduler: "simple",
+        shift_video: 12,
+        shift_audio: 3,
+        sage_attention: true,
+        sol_min_tokens: "exact_kv_and_rows",
+    };
+
+    assert.equal(restoreNamedWidgetValues(node, namedValues), false);
     assert.equal(node.widgets.every((widget) => widget.value === undefined), true);
 });
 

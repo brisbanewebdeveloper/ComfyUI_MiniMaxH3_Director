@@ -10881,6 +10881,21 @@ function migrateAdvancedWidgetValues(node, config) {
     const samplingDefaults = [25, "res_multistep", "simple", 12, 3];
     let migrated = false;
 
+    const legacyEnhancementShifted = () => {
+        const start = loraIndex + 1;
+        return loraIndex >= 0
+            && typeof values[start] === "boolean"
+            && typeof values[start + 1] === "boolean"
+            && typeof values[start + 2] === "boolean"
+            && typeof values[start + 3] === "number"
+            && typeof values[start + 8] === "string"
+            && typeof values[start + 9] === "boolean"
+            && typeof values[start + 10] === "string"
+            && typeof values[start + 11] === "boolean"
+            && typeof values[start + 12] === "boolean"
+            && typeof values[start + 14] === "string";
+    };
+
     const isLoraConfig = (value) => {
         if (typeof value !== "string") return false;
         try {
@@ -10952,6 +10967,40 @@ function migrateAdvancedWidgetValues(node, config) {
         migrated = true;
     }
 
+    if (legacyEnhancementShifted()) {
+        const start = loraIndex + 1;
+        const legacy = values.slice(start, firstIndex);
+        const bool = (value, fallback) => typeof value === "boolean" ? value : fallback;
+        const number = (value, fallback, min = -Infinity, max = Infinity) => (
+            typeof value === "number" && Number.isFinite(value) && value >= min && value <= max
+                ? value
+                : fallback
+        );
+        const string = (value, fallback) => typeof value === "string" ? value : fallback;
+        const repaired = [
+            // The removed model-sampling toggle is deliberately discarded.
+            bool(legacy[1], false), "auto", bool(legacy[2], false), false, false,
+            number(legacy[3], 1.3, 0, 4),
+            number(legacy[4], 0.2, 0, 1),
+            number(legacy[5], 0.9, 0, 1),
+            number(legacy[6], 4096, 0, 1 << 20),
+            bool(legacy[7], true),
+            ["exact_kv", "exact_kv_and_rows", "off"].includes(legacy[8])
+                ? legacy[8] : "exact_kv_and_rows",
+            bool(legacy[9], false),
+            ["3d", "2d_frame"].includes(legacy[10]) ? legacy[10] : "2d_frame",
+            bool(legacy[11], true), bool(legacy[12], false), bool(legacy[13], false),
+            string(legacy[14], ""), string(legacy[15], ""),
+            bool(legacy[16], false),
+            number(legacy[17], 0.2, 0, 3),
+            number(legacy[18], 0.15, 0, 1),
+            number(legacy[19], 0.95, 0, 1),
+            bool(legacy[20], false),
+        ];
+        values.splice(start, firstIndex - start, ...repaired);
+        migrated = true;
+    }
+
     if (migrated && perfIndex >= 0) {
         // Legacy arrays can contain duplicate Performance labels where the
         // trailing group was appended. Keep the canonical typed tail.
@@ -10970,6 +11019,32 @@ function restoreNamedWidgetValues(node, namedValues) {
         || typeof namedValues.shift_audio !== "number" || !Number.isFinite(namedValues.shift_audio)) {
         return false;
     }
+    const booleanNames = [
+        "enable_sage_attention", "allow_sage_compile", "enable_h3_mem_eff_sage", "enable_sol_attn",
+        "sol_int8_qk", "sol_morton", "sol_int8_pv", "sol_verbose", "sol_use_tma",
+        "enable_easycache", "easycache_verbose", "enable_firstblock_cache", "firstblock_cache_verbose",
+        "enable_cfg_norm", "cfg_norm_pre_cfg", "clear_vram_between_segments", "export_source_images",
+    ];
+    if (booleanNames.some((name) => Object.hasOwn(namedValues, name) && typeof namedValues[name] !== "boolean")) {
+        return false;
+    }
+    const finiteNames = [
+        "sol_tau", "sol_start_percent", "sol_end_percent", "easycache_reuse_threshold",
+        "easycache_start_percent", "easycache_end_percent", "firstblock_cache_threshold", "cfg_norm_strength",
+    ];
+    if (finiteNames.some((name) => Object.hasOwn(namedValues, name)
+        && (typeof namedValues[name] !== "number" || !Number.isFinite(namedValues[name])))) {
+        return false;
+    }
+    if (Object.hasOwn(namedValues, "sol_min_tokens")
+        && (!Number.isInteger(namedValues.sol_min_tokens) || namedValues.sol_min_tokens < 0)) return false;
+    const comboValues = {
+        sage_attention: ["auto", "sageattn_qk_int8_pv_fp16_cuda", "sageattn_qk_int8_pv_fp16_triton", "sageattn_qk_int8_pv_fp8_cuda", "sageattn_qk_int8_pv_fp8_cuda++", "sageattn3", "sageattn3_per_block_mean"],
+        sol_sink_conditioning: ["exact_kv", "exact_kv_and_rows", "off"],
+        sol_morton_curve: ["3d", "2d_frame"],
+    };
+    if (Object.entries(comboValues).some(([name, options]) => Object.hasOwn(namedValues, name)
+        && !options.includes(namedValues[name]))) return false;
     let restored = false;
     for (const widget of node?.widgets || []) {
         if (widget?.serialize === false || !Object.hasOwn(namedValues, widget.name)) continue;
