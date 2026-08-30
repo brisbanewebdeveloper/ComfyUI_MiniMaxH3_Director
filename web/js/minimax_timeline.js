@@ -9980,7 +9980,11 @@ class MiniMaxH3DirectorEditor {
         const timelineSeg = detail.timeline_segment ?? runSeg;
         const partialRun = !!detail.partial_run
             || (this.isRunSelectEnabled?.() && runTotal < timelineTotal);
-        const phaseLabel = detail.phase_label || detail.phase || t("run.phase.default");
+        const phaseKey = detail.phase ? `run.phase.${detail.phase}` : "run.phase.default";
+        const localizedPhase = t(phaseKey);
+        const phaseLabel = localizedPhase === phaseKey
+            ? (detail.phase || t("run.phase.default"))
+            : localizedPhase;
         const overallPct = detail.overall_max > 0
             ? Math.round((100 * detail.overall_value) / detail.overall_max)
             : 0;
@@ -10038,7 +10042,13 @@ class MiniMaxH3DirectorEditor {
         }
         this.runTitleEl.textContent = title;
         const parts = [];
-        if (detail.frames_label) parts.push(detail.frames_label);
+        if (detail.frame_start != null && detail.frame_end != null && detail.frame_count != null) {
+            parts.push(t("run.detailFrames", {
+                start: detail.frame_start,
+                end: detail.frame_end,
+                count: detail.frame_count,
+            }));
+        }
         if (detail.task_key) parts.push(detail.task_key);
         parts.push(t("run.detailOverall", { pct: overallPct }));
         if (runTotal > 1) {
@@ -11222,7 +11232,6 @@ app.registerExtension({
                 timeline_segment_total: timelineTotal,
                 partial_run: editor.isRunSelectEnabled?.() && segTotal < timelineTotal,
                 phase: "plan",
-                phase_label: t("executing.parseTimeline"),
                 phase_value: 0,
                 phase_max: 1,
                 overall_value: 0,

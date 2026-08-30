@@ -144,7 +144,3 @@ def tensor_frame_to_jpeg_b64(frame: torch.Tensor) -> str:
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=88)
     return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-def frames_label(seg) -> str:
-    return f"帧 {seg.start_frame}–{seg.end_frame} ({seg.frame_count}f)"

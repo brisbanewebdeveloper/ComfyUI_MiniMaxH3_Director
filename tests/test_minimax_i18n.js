@@ -30,3 +30,14 @@ test("prompt enhancer translation keys exist in both dictionaries", () => {
         assert.equal(typeof zh[key], "string", `missing Chinese key: ${key}`);
     }
 });
+
+test("Director progress phases and frame details exist in both dictionaries", () => {
+    const phases = ["default", "prepare", "context_encode", "sample", "upscale", "refine", "decode", "plan", "finish"];
+    for (const phase of phases) {
+        const key = `run.phase.${phase}`;
+        assert.equal(typeof en[key], "string", `missing English key: ${key}`);
+        assert.equal(typeof zh[key], "string", `missing Chinese key: ${key}`);
+    }
+    assert.equal(typeof en["run.detailFrames"], "string");
+    assert.equal(typeof zh["run.detailFrames"], "string");
+});

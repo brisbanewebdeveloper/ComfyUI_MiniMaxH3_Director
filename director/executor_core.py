@@ -22,7 +22,6 @@ from .audio_export import (
     resolve_audio_mode,
 )
 from .segment_runtime import (
-    frames_label,
     resolve_segment_raw_clip,
     segment_passthrough_audio,
     segment_passthrough_chunk,
@@ -384,7 +383,9 @@ def execute_director_plan_core(
 
         ui_idx = seg.timeline_index
         meta = {
-            "frames_label": frames_label(seg),
+            "frame_start": int(seg.start_frame),
+            "frame_end": int(seg.end_frame),
+            "frame_count": int(seg.frame_count),
             "task_key": seg.task_key,
             "timeline_segment_index": ui_idx,
             "timeline_segment_total": timeline_seg_total,

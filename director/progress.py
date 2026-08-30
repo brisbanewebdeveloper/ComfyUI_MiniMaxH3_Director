@@ -15,18 +15,6 @@ DIRECTOR_PHASES = (
     "decode",
 )
 
-PHASE_LABELS = {
-    "prepare": "准备片段",
-    "context_encode": "H3 条件编码",
-    "sample": "采样",
-    "upscale": "放大",
-    "refine": "精修采样",
-    "decode": "AV 解码",
-    "plan": "解析时间轴 / 加载视频",
-    "finish": "全部完成",
-}
-
-
 def _phase_index(phase: str) -> int:
     try:
         return DIRECTOR_PHASES.index(phase)
@@ -42,7 +30,9 @@ def report_director_progress(
     phase: str,
     phase_value: float = 0,
     phase_max: float = 1,
-    frames_label: str = "",
+    frame_start: int | None = None,
+    frame_end: int | None = None,
+    frame_count: int | None = None,
     task_key: str = "",
     timeline_segment_index: int | None = None,
     timeline_segment_total: int | None = None,
@@ -82,13 +72,14 @@ def report_director_progress(
         "timeline_segment_total": timeline_total,
         "partial_run": partial_run,
         "phase": phase,
-        "phase_label": PHASE_LABELS.get(phase, phase),
         "phase_value": phase_value,
         "phase_max": phase_max,
         "overall_value": overall_value,
         "overall_max": overall_max,
         "remaining_segments": remaining_segments,
-        "frames_label": frames_label,
+        "frame_start": frame_start,
+        "frame_end": frame_end,
+        "frame_count": frame_count,
         "task_key": task_key,
     }
 
