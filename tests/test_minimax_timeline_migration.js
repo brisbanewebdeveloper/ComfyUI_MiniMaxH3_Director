@@ -11,9 +11,9 @@ const migrations = Function(`
         return String(value || "").split(/ — | —— | - | – /, 1)[0].trim();
     }
     ${source.slice(start, end)}
-    return { migrateAdvancedWidgetValues, migrateEnglishWidgetValues };
+    return { migrateAdvancedWidgetValues, migrateEnglishWidgetValues, restoreNamedWidgetValues };
 `)();
-const { migrateAdvancedWidgetValues, migrateEnglishWidgetValues } = migrations;
+const { migrateAdvancedWidgetValues, migrateEnglishWidgetValues, restoreNamedWidgetValues } = migrations;
 
 function makeNode(widgetCount = 10) {
     const names = ["base_a", "base_b", "enable_firstblock_cache", "firstblock_cache_threshold", "firstblock_cache_verbose", "enable_cfg_norm", "cfg_norm_strength", "cfg_norm_pre_cfg"];
@@ -116,6 +116,43 @@ test("repairs a legacy array that omitted the base sampling widgets", () => {
     assert.deepEqual(config.widgets_values.slice(stepsIndex, stepsIndex + 5), [25, "res_multistep", "simple", 12, 3]);
     assert.equal(config.widgets_values[node.widgets.findIndex((widget) => widget.name === "lora_config")], "[]");
     assert.deepEqual(config.widgets_values.slice(-4), ["Performance", true, false, ""]);
+});
+
+test("repairs a legacy array with a partially omitted sampling prefix", () => {
+    const node = makeCurrentAdvancedNode();
+    const values = makeCurrentAdvancedValues(node);
+    const stepsIndex = node.widgets.findIndex((widget) => widget.name === "steps");
+    values.splice(stepsIndex, 3);
+    const config = { widgets_values: values };
+
+    assert.equal(migrateAdvancedWidgetValues(node, config), true);
+    assert.deepEqual(config.widgets_values.slice(stepsIndex, stepsIndex + 5), [25, "res_multistep", "simple", 12, 3]);
+    assert.deepEqual(config.widgets_values.slice(-4), ["Performance", true, false, ""]);
+});
+
+test("restores Advanced values by name when the saved named map is valid", () => {
+    const node = makeCurrentAdvancedNode();
+    const namedValues = {
+        steps: 8,
+        sampler: "euler",
+        scheduler: "simple",
+        shift_video: 12,
+        shift_audio: 3,
+        lora_config: "[]",
+    };
+
+    assert.equal(restoreNamedWidgetValues(node, namedValues), true);
+    assert.equal(node.widgets.find((widget) => widget.name === "steps").value, 8);
+    assert.equal(node.widgets.find((widget) => widget.name === "sampler").value, "euler");
+    assert.equal(node.widgets.find((widget) => widget.name === "shift_video").value, 12);
+    assert.equal(node.widgets.find((widget) => widget.name === "lora_config").value, "[]");
+});
+
+test("ignores a named map with invalid sampling values", () => {
+    const node = makeCurrentAdvancedNode();
+
+    assert.equal(restoreNamedWidgetValues(node, { steps: "euler" }), false);
+    assert.equal(node.widgets.every((widget) => widget.value === undefined), true);
 });
 
 test("rewrites legacy Director task labels in English", () => {

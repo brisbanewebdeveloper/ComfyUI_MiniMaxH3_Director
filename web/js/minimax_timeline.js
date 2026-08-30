@@ -10905,10 +10905,17 @@ function migrateAdvancedWidgetValues(node, config) {
 
     // Older Advanced arrays either omitted the five base sampling widgets or
     // omitted lora_config. Recover the stable values around those gaps.
-    if (stepsIndex >= 0 && loraIndex >= 0 && !hasSampling() && isLoraConfig(values[stepsIndex])) {
-        values.splice(stepsIndex, 0, ...samplingDefaults);
-        migrated = true;
-    } else if (loraIndex >= 0 && hasSampling() && !isLoraConfig(values[loraIndex])) {
+    if (stepsIndex >= 0 && loraIndex >= 0 && !hasSampling()) {
+        const samplingEnd = values
+            .slice(stepsIndex, stepsIndex + samplingDefaults.length)
+            .findIndex(isLoraConfig);
+        if (samplingEnd >= 0) {
+            const missing = samplingDefaults.length - samplingEnd;
+            values.splice(stepsIndex, 0, ...samplingDefaults.slice(0, missing));
+            migrated = true;
+        }
+    }
+    if (loraIndex >= 0 && hasSampling() && !isLoraConfig(values[loraIndex])) {
         values.splice(loraIndex, 0, "[]");
         migrated = true;
     }
@@ -10948,9 +10955,28 @@ function migrateAdvancedWidgetValues(node, config) {
     if (migrated && perfIndex >= 0) {
         // Legacy arrays can contain duplicate Performance labels where the
         // trailing group was appended. Keep the canonical typed tail.
-        values.splice(perfIndex, Math.max(0, values.length - perfIndex), "Performance", true, false, "");
+        const tailIndex = Math.max(0, values.length - 4);
+        values.splice(tailIndex, 4, "Performance", true, false, "");
     }
     return migrated;
+}
+
+function restoreNamedWidgetValues(node, namedValues) {
+    if (!namedValues || typeof namedValues !== "object" || Array.isArray(namedValues)) return false;
+    if (typeof namedValues.steps !== "number" || !Number.isFinite(namedValues.steps)
+        || typeof namedValues.sampler !== "string"
+        || typeof namedValues.scheduler !== "string"
+        || typeof namedValues.shift_video !== "number" || !Number.isFinite(namedValues.shift_video)
+        || typeof namedValues.shift_audio !== "number" || !Number.isFinite(namedValues.shift_audio)) {
+        return false;
+    }
+    let restored = false;
+    for (const widget of node?.widgets || []) {
+        if (widget?.serialize === false || !Object.hasOwn(namedValues, widget.name)) continue;
+        widget.value = namedValues[widget.name];
+        restored = true;
+    }
+    return restored;
 }
 
 function applyConfiguredWidgetValues(node, values) {
@@ -11182,8 +11208,10 @@ app.registerExtension({
                 ? migrateAdvancedWidgetValues(this, config)
                 : false;
             const migratedValues = migrated ? config.widgets_values.slice() : null;
+            const namedValues = isAdvancedDirectorNode(this) ? config?.widgets_values_named : null;
             const out = configure?.apply(this, arguments);
             if (migrated) applyConfiguredWidgetValues(this, migratedValues);
+            if (namedValues) restoreNamedWidgetValues(this, namedValues);
             return out;
         };
 
