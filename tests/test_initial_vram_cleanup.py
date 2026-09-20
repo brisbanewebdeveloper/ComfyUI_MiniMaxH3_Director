@@ -11,7 +11,7 @@ class ConditioningReached(RuntimeError):
     pass
 
 
-def execution_plan():
+def _execution_plan() -> SimpleNamespace:
     segment = SimpleNamespace(
         index=0,
         timeline_index=0,
@@ -40,8 +40,8 @@ def execution_plan():
 
 
 class InitialVramCleanupTest(unittest.TestCase):
-    def run_until_conditioning(self, clear_vram_between_segments):
-        events = []
+    def run_until_conditioning(self, clear_vram_between_segments: bool) -> list[str]:
+        events: list[str] = []
 
         def cleanup(*, enabled=True, unload_models=True):
             events.append("cleanup")
@@ -64,7 +64,7 @@ class InitialVramCleanupTest(unittest.TestCase):
         ):
             with self.assertRaises(ConditioningReached):
                 executor_core.execute_director_plan_core(
-                    execution_plan(),
+                    _execution_plan(),
                     model=object(),
                     vae=object(),
                     audio_vae=object(),
