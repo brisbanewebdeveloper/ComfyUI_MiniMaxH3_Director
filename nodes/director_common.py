@@ -83,7 +83,7 @@ def director_perf_inputs() -> dict:
             "BOOLEAN",
             {
                 "default": True,
-                "tooltip": "Unload models and empty the CUDA cache after each segment.",
+                "tooltip": "Unload models and empty the CUDA cache before execution and between segments.",
             },
         ),
         "export_source_images": (

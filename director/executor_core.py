@@ -313,7 +313,7 @@ def execute_director_plan_core(
     if mp4_run_dir is not None:
         reports.append(f"Segment mp4 export dir: {mp4_run_dir}")
     if clear_vram_between_segments:
-        reports.append("VRAM: 段间清理显存已开启。")
+        reports.append("VRAM: 执行前与段间清理显存已开启。")
     if audio_mode == AUDIO_MODE_MUTE:
         reports.append("Audio: muted — skip audio VAE decode, silent AUDIO output.")
     elif audio_mode == AUDIO_MODE_SOURCE:
@@ -1071,6 +1071,9 @@ def execute_director_plan_core(
             ui_idx + 1, timeline_seg_total, target_len, seg.task_key,
         )
         return chunk, audio_dict, pre_chunk
+
+    if clear_vram_between_segments and run_list:
+        cleanup_segment_vram(enabled=True)
 
     for seg in all_segments:
         if seg.index in run_indices:
