@@ -1,4 +1,4 @@
-﻿import { app } from "../../scripts/app.js";
+import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
     CUSTOM_ASPECT_RATIO,
@@ -35,6 +35,9 @@ import {
     RESOLUTION_ASPECTS,
     resolutionFromSelector,
     resolveTaskKey,
+    resolveSegmentTaskKey,
+    resolveSegmentRefImageSize,
+    normalizeRefImageSize,
     snapResolutionDim,
     sumFrameCounts,
     taskUsesReferenceAudios,
@@ -71,6 +74,11 @@ import {
     wireMediaDuration,
 } from "./minimax_image_batch.js";
 import {
+    extractReferenceAudioFromExistingVideo,
+    hasDuplicateReferenceAudio,
+    prepareLocalReferenceAudio,
+} from "./minimax_ref_audio.js";
+import {
     FL2V_STYLES,
     bindFl2vEvents,
     buildFl2vPayloadFields,
@@ -94,7 +102,7 @@ import {
     updateFl2vDetailUI,
     updateFl2vToolbarBtns,
 } from "./minimax_fl2v.js";
-import { mountPromptImageMentions, refreshPromptTokenEditors, safePreviewImageUrl } from "./minimax_prompt_mentions.js";
+import { mountPromptImageMentions, refreshPromptTokenEditors, safePreviewImageUrl, teardownPromptImageMentions } from "./minimax_prompt_mentions.js";
 import {
     openReferenceSemanticsEditor,
     REFERENCE_SEMANTICS_STYLES,
@@ -108,11 +116,21 @@ import {
     taskDisplayLabel,
     toggleLocale,
 } from "./minimax_i18n.js";
+import { bindPackActions } from "./minimax_pack.js";
+import {
+    attachExternalGroupsWitness,
+    injectExternalGroupsWitness,
+    setExternalGroupSpecsProvider,
+} from "./minimax_external_witness.js";
 
 const RULER_H = 24;
 const SEG_LABEL_H = 20;
 const TRACK_H = 160;
 const TRACK_Y = RULER_H + SEG_LABEL_H;
+/** Nice major steps (seconds) for CapCut-style ruler labels. */
+const RULER_MAJOR_SEC = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
+const RULER_MIN_MAJOR_PX = 64;
+const RULER_MIN_MINOR_PX = 7;
 const STAGE_PREVIEW_H = 220;
 const LIVE_SAMPLE_PREVIEW_H = 320;
 const MIN_SEG = 4;
@@ -147,6 +165,21 @@ function isContinuityEnabled(output) {
     return false;
 }
 
+function isContinuityKeepTail(output) {
+    if (!output) return true;
+    const raw = output.continuityKeepTail ?? output.continuity_keep_tail;
+    if (raw === undefined || raw === null) return true;
+    if (raw === true || raw === 1) return true;
+    if (raw === false || raw === 0) return false;
+    if (typeof raw === "string") {
+        const s = raw.trim().toLowerCase();
+        if (s === "") return true;
+        if (s === "false" || s === "0" || s === "no" || s === "off") return false;
+        return true;
+    }
+    return true;
+}
+
 /** Whether段间引导 controls apply for the current task + segment count. */
 function isContinuityEligible(editor) {
     if (!editor) return false;
@@ -170,7 +203,34 @@ function normalizeAudioMode(value) {
 const CONTINUITY_FRAME_CHOICES = [5, 22, 39, 56];
 /** Official Motion Context baseline recommendation. */
 const DEFAULT_CONTINUITY_FRAMES = 22;
-const CONTINUITY_TASKS = new Set(["t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v"]);
+const DEFAULT_CONTINUITY_MODE = "guide";
+const DEFAULT_CONTINUITY_REDRAW = 0.10;
+const MIN_CONTINUITY_REDRAW = 0;
+const MAX_CONTINUITY_REDRAW = 0.95;
+
+function normalizeContinuityMode(raw) {
+    const s = String(raw ?? "").trim().toLowerCase();
+    if (
+        s === "continue"
+        || s === "continuation"
+        || s === "latent"
+        || s === "guide_redraw"
+        || s === "guide+redraw"
+        || s === "redraw"
+    ) return "continue";
+    return DEFAULT_CONTINUITY_MODE;
+}
+
+function snapContinuityRedraw(raw) {
+    const n = parseFloat(raw);
+    const value = Number.isFinite(n) ? n : DEFAULT_CONTINUITY_REDRAW;
+    return Math.round(Math.min(MAX_CONTINUITY_REDRAW, Math.max(MIN_CONTINUITY_REDRAW, value)) * 100) / 100;
+}
+const CONTINUITY_TASKS = new Set(["t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v", "mixed"]);
+
+function isVideoEditTaskKey(taskKey) {
+    return taskKey === "v2v" || taskKey === "rv2v";
+}
 
 function snapContinuityFrames(raw) {
     const n = parseInt(raw, 10);
@@ -193,7 +253,13 @@ function normalizeOutputContinuity(output = {}) {
         ...output,
         continuityEnabled: isContinuityEnabled(output),
         continuityOverlapFrames: snapContinuityFrames(rawOverlap),
+        continuityMode: normalizeContinuityMode(output.continuityMode ?? output.continuity_mode),
+        continuityRedraw: snapContinuityRedraw(
+            output.continuityRedraw ?? output.continuity_redraw ?? DEFAULT_CONTINUITY_REDRAW,
+        ),
+        continuityKeepTail: isContinuityKeepTail(output),
         audioMode: normalizeAudioMode(output.audioMode ?? output.audio_mode),
+        refImageSize: normalizeRefImageSize(output.refImageSize ?? output.ref_image_size),
     };
 }
 
@@ -266,6 +332,7 @@ function sanitizeSegmentForPayload(seg) {
     const {
         previewB64,
         previewFrames,
+        previewMime,
         imageB64,
         ...rest
     } = seg;
@@ -276,6 +343,22 @@ function sanitizeSegmentForPayload(seg) {
         refVideos: Array.isArray(rest.refVideos) ? rest.refVideos.map(sanitizeRefVideo) : [],
         genImage: rest.genImage
             ? { imageFile: rest.genImage.imageFile || "", fileName: rest.genImage.fileName || "" }
+            : undefined,
+        startImage: rest.startImage
+            ? {
+                imageFile: rest.startImage.imageFile || "",
+                fileName: rest.startImage.fileName || "",
+                width: rest.startImage.width || 0,
+                height: rest.startImage.height || 0,
+            }
+            : undefined,
+        endImage: rest.endImage
+            ? {
+                imageFile: rest.endImage.imageFile || "",
+                fileName: rest.endImage.fileName || "",
+                width: rest.endImage.width || 0,
+                height: rest.endImage.height || 0,
+            }
             : undefined,
         referenceVideo: rest.referenceVideo
             ? {
@@ -425,6 +508,8 @@ function stripTimelineEphemeralFields(timeline) {
 const HIDDEN_WIDGETS = [
     "timeline_data", "total_frames", "width", "height", "ref_max_size",
     "task_type", "global_prompt", "frame_rate", "cfg",
+    "export_source_images",
+    "export_pre_face_refine",
     // seed stays visible under 采样设置 (with control_after_generate)
 ];
 
@@ -479,21 +564,296 @@ const ADVANCED_MODEL_GROUPS = [
 const DIRECTOR_WIDGET_LABEL_KEYS = {
     seed: "widget.seed",
     clear_vram_between_segments: "widget.clearVram",
+    clear_vram_before_refine: "widget.clearVramBeforeRefine",
+    clear_vram_before_face_refine: "widget.clearVramBeforeFaceRefine",
     export_source_images: "widget.exportSourceImages",
+    export_pre_face_refine: "widget.exportPreFaceRefine",
     control_after_generate: "widget.controlAfterGenerate",
     "control after generate": "widget.controlAfterGenerate",
 };
 
 const DIRECTOR_WIDGET_TOOLTIP_KEYS = {
     clear_vram_between_segments: "widget.tooltip.clearVram",
+    clear_vram_before_refine: "widget.tooltip.clearVramBeforeRefine",
+    clear_vram_before_face_refine: "widget.tooltip.clearVramBeforeFaceRefine",
     export_source_images: "widget.tooltip.exportSourceImages",
+    export_pre_face_refine: "widget.tooltip.exportPreFaceRefine",
 };
 
 const DIRECTOR_GROUP_LABEL_KEYS = {
     bd_grp_sample: "widget.grpSample",
     bd_grp_advanced: "widget.grpAdvanced",
     bd_grp_perf: "widget.grpPerf",
+    bd_grp_face_detect: "widget.grpFaceDetect",
+    bd_grp_face_sample: "widget.grpSample",
+    bd_grp_face_paste: "widget.grpFacePaste",
+    bd_grp_selflift_sample: "widget.grpSelfLiftSample",
+    bd_grp_selflift_lift: "widget.grpSelfLiftLift",
+    bd_grp_selflift_tile: "widget.grpSelfLiftTile",
 };
+
+function widgetByName(node, name) {
+    return node.widgets?.find((w) => w.name === name);
+}
+
+function findDirectorWidget(node, name) {
+    const key = String(name || "");
+    const direct = widgetByName(node, key);
+    if (direct) return direct;
+    if (/control[_\s]?after[_\s]?generate/i.test(key)) {
+        for (const w of node?.widgets || []) {
+            for (const linked of w.linkedWidgets || []) {
+                const linkedName = String(linked?.name || linked?.label || "");
+                if (/control[_\s]?after[_\s]?generate/i.test(linkedName)) return linked;
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * ComfyUI applies widgets_values by index during configure(), before seed's
+ * control_after_generate linked combo may exist — shifting optional widgets
+ * (steps defaults back to 25). Re-apply saved values by name once widgets settle.
+ */
+function restoreDirectorWidgetsFromSaved(node, data) {
+    if (!node || !data) return false;
+
+    const named = data.widgets_values_named;
+    if (named && typeof named === "object") {
+        node._mmxRestoringSampleWidgets = true;
+        try {
+            for (const [name, value] of Object.entries(named)) {
+                if (name === DIRECTOR_DOM_WIDGET_NAME) continue;
+                if (value === undefined) continue;
+                const w = findDirectorWidget(node, name);
+                if (!w || w.serialize === false) continue;
+                w.value = value;
+            }
+        } finally {
+            node._mmxRestoringSampleWidgets = false;
+        }
+        return true;
+    }
+
+    const values = data.widgets_values;
+    if (!Array.isArray(values) || !values.length) return false;
+
+    node._mmxRestoringSampleWidgets = true;
+    try {
+        let idx = 0;
+        for (const w of node.widgets ?? []) {
+            if (w.serialize === false) continue;
+            if (idx >= values.length) break;
+            w.value = values[idx++];
+        }
+    } finally {
+        node._mmxRestoringSampleWidgets = false;
+    }
+    return true;
+}
+
+function applyDirectorConfigureRestore(node, data) {
+    if (!node) return false;
+    finalizeDirectorWidgetOrder(node);
+    return restoreDirectorWidgetsFromSaved(node, data);
+}
+
+function finishDirectorConfigureRestore(node) {
+    applyDirectorConfigureRestore(node, node._mmxSavedConfigureData);
+    node._mmxPendingConfigureRestore = false;
+    snapshotDirectorSampleWidgets(node, { includeHidden: true });
+}
+
+const DIRECTOR_SAMPLE_VALUE_WIDGETS = [
+    "steps",
+    "sampler",
+    "scheduler",
+    "shift_video",
+    "shift_audio",
+    "cfg",
+    "seed",
+];
+
+/** Scheduler names that are never valid KSampler sampler ids. */
+const SCHEDULER_ONLY_NAMES = new Set([
+    "simple",
+    "normal",
+    "karras",
+    "exponential",
+    "sgm_uniform",
+    "ddim_uniform",
+    "beta",
+    "linear_quadratic",
+    "kl_optimal",
+]);
+
+function hiddenWidgetSize() {
+    return [0, -4];
+}
+
+function hiddenWidgetDraw() {}
+
+function isValidSampleWidgetValue(name, widget, value) {
+    if (value === undefined || value === null || value === "") return false;
+    if (name === "sampler" || name === "scheduler") {
+        if (typeof value !== "string") return false;
+        const opts = widget?.options?.values;
+        if (Array.isArray(opts) && opts.length && !opts.includes(value)) return false;
+        if (name === "sampler" && SCHEDULER_ONLY_NAMES.has(value)) return false;
+        return true;
+    }
+    const num = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(num);
+}
+
+function snapshotDirectorSampleWidgets(node, { force = false, includeHidden = false } = {}) {
+    if (!node || node._mmxRestoringSampleWidgets || node._mmxLockSampleSnap) return;
+    if (node._mmxPendingConfigureRestore && !force) return;
+    const snap = { ...(node._mmxSampleWidgetSnap || {}) };
+    for (const name of DIRECTOR_SAMPLE_VALUE_WIDGETS) {
+        const w = widgetByName(node, name);
+        if (!w || w.value === undefined) continue;
+        if (!includeHidden && w._mmxForceHidden) continue;
+        if (!force && !isValidSampleWidgetValue(name, w, w.value)) continue;
+        snap[name] = w.value;
+    }
+    node._mmxSampleWidgetSnap = snap;
+}
+
+function restoreDirectorSampleWidgets(node) {
+    const snap = node?._mmxSampleWidgetSnap;
+    if (!snap || !node) return;
+    node._mmxRestoringSampleWidgets = true;
+    try {
+        for (const name of DIRECTOR_SAMPLE_VALUE_WIDGETS) {
+            const w = widgetByName(node, name);
+            if (!w || snap[name] === undefined) continue;
+            if (w.value !== snap[name]) w.value = snap[name];
+        }
+    } finally {
+        node._mmxRestoringSampleWidgets = false;
+    }
+}
+
+function lockDirectorSampleSnap(node, ms = 250) {
+    if (!node) return;
+    node._mmxLockSampleSnap = true;
+    clearTimeout(node._mmxUnlockSampleSnapTimer);
+    node._mmxUnlockSampleSnapTimer = setTimeout(() => {
+        node._mmxLockSampleSnap = false;
+    }, ms);
+}
+
+function hookDirectorSampleWidgetSnapshots(node) {
+    if (!node) return;
+    for (const name of DIRECTOR_SAMPLE_VALUE_WIDGETS) {
+        const w = widgetByName(node, name);
+        if (!w || w._mmxSnapPatched) continue;
+        w._mmxSnapPatched = true;
+        const prev = w.callback;
+        w.callback = function (...args) {
+            const r = prev?.apply(this, args);
+            snapshotDirectorSampleWidgets(node);
+            return r;
+        };
+    }
+}
+
+function lockDirectorSigmasInput(node) {
+    const inp = (node?.inputs || []).find((i) => String(i.name) === "sigmas");
+    if (!inp) return;
+    inp.tooltip = t("widget.tooltip.sigmas");
+    if (inp._mmxSigmasLocked) return;
+    inp._mmxSigmasLocked = true;
+    try {
+        Object.defineProperty(inp, "widget", {
+            get() { return undefined; },
+            set() { /* socket-only: never convert SIGMAS to a widget */ },
+            configurable: true,
+            enumerable: true,
+        });
+    } catch {
+        inp.widget = undefined;
+    }
+}
+
+function hideDirectorSigmasWidget(node) {
+    const w = widgetByName(node, "sigmas");
+    if (!w) return;
+    if (typeof w.computeSize === "function"
+        && w.computeSize !== hiddenWidgetSize
+        && !w._mmxOrigComputeSize) {
+        w._mmxOrigComputeSize = w.computeSize.bind(w);
+    }
+    w.hidden = true;
+    if (!w.options) w.options = {};
+    w.options.hidden = true;
+    w.computeSize = hiddenWidgetSize;
+    w.draw = hiddenWidgetDraw;
+    if (w.element) w.element.style.display = "none";
+}
+
+function setDirectorWidgetVisible(node, name, visible) {
+    const w = widgetByName(node, name);
+    if (!w) return;
+    if (typeof w.computeSize === "function"
+        && w.computeSize !== hiddenWidgetSize
+        && !w._mmxOrigComputeSize) {
+        w._mmxOrigComputeSize = w.computeSize.bind(w);
+    }
+    const hide = !visible;
+    if (!w.options) w.options = {};
+    w.hidden = hide;
+    w.options.hidden = hide;
+    w._mmxForceHidden = hide;
+    if (hide) {
+        if (!w._mmxOrigDraw && typeof w.draw === "function" && w.draw !== hiddenWidgetDraw) {
+            w._mmxOrigDraw = w.draw;
+        }
+        w.computeSize = hiddenWidgetSize;
+        w.draw = hiddenWidgetDraw;
+        if (w.element) w.element.style.display = "none";
+    } else {
+        if (w._mmxOrigComputeSize) w.computeSize = w._mmxOrigComputeSize;
+        else if (w.computeSize === hiddenWidgetSize) delete w.computeSize;
+        if (w._mmxOrigDraw) w.draw = w._mmxOrigDraw;
+        else if (w.draw === hiddenWidgetDraw) delete w.draw;
+        if (w.element) w.element.style.display = "";
+    }
+}
+
+function directorHasSigmasLink(node) {
+    const inp = (node?.inputs || []).find((i) => String(i.name) === "sigmas");
+    if (!inp) return false;
+    if (inp.link != null) return true;
+    return Array.isArray(inp.links) && inp.links.length > 0;
+}
+
+function syncDirectorSchedulerWidgets(node, { restore = false } = {}) {
+    if (!node) return;
+    hookDirectorSampleWidgetSnapshots(node);
+    lockDirectorSigmasInput(node);
+    hideDirectorSigmasWidget(node);
+    if (restore) restoreDirectorSampleWidgets(node);
+    const wired = directorHasSigmasLink(node);
+    setDirectorWidgetVisible(node, "steps", !wired);
+    setDirectorWidgetVisible(node, "scheduler", !wired);
+    if (restore) restoreDirectorSampleWidgets(node);
+    node.setDirtyCanvas?.(true, true);
+}
+
+function settleDirectorSampleWidgets(node) {
+    syncDirectorSchedulerWidgets(node, { restore: true });
+    queueMicrotask(() => {
+        restoreDirectorSampleWidgets(node);
+        syncDirectorSchedulerWidgets(node, { restore: true });
+    });
+    setTimeout(() => {
+        restoreDirectorSampleWidgets(node);
+        syncDirectorSchedulerWidgets(node, { restore: true });
+    }, 0);
+}
 
 function applyDirectorWidgetLabels(node) {
     for (const w of node.widgets || []) {
@@ -525,6 +885,7 @@ function applyDirectorWidgetLabels(node) {
             }
         }
     }
+    syncDirectorSchedulerWidgets(node);
 }
 
 function drawGroupHeader(ctx, node, widget_width, y, H, label) {
@@ -577,7 +938,8 @@ function makeGroupHeaderWidget(inputName, inputData) {
             drawGroupHeader(ctx, node, widget_width, y, H, text);
         },
         computeSize(width) {
-            return [width, 26];
+            // DOM header is margin+padding+text (~40px). 26 clipped Vue SelfLift/Refine.
+            return [width, 38];
         },
         mouse() {
             return false;
@@ -639,6 +1001,7 @@ const STYLES = `
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source,
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-fl2v,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-refs:not(.bd-batch-r2v){
   /* Header stays compact; leftover height goes to the prompt row (not a blank gap). */
   grid-template-rows:auto minmax(0,1fr);
@@ -646,9 +1009,11 @@ const STYLES = `
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain .bd-batch-head,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source .bd-batch-head,
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-fl2v .bd-batch-head,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-head{align-self:start}
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain .bd-batch-prompts,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source .bd-batch-prompts,
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-fl2v .bd-batch-prompts,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-prompts{
   height:100%;min-height:0;max-height:100%;overflow:hidden;align-self:stretch
 }
@@ -663,6 +1028,49 @@ const STYLES = `
 .bd-modal-item:hover{background:#252525;color:#eee}
 .bd-modal-item.selected{background:#2a2a2a;border-color:#4fff8f;color:#fff}
 .bd-modal-actions{display:flex;gap:8px;justify-content:flex-end;flex-shrink:0}
+.bd-media-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.bd-media-head .bd-modal-title{flex:1;min-width:0;padding-top:4px}
+.bd-media-head-actions{display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end}
+.bd-media-status{color:#999;font-size:11px;line-height:1.4;min-height:15px}
+.bd-media-modal{max-width:860px}
+.bd-media-modal .bd-btn-primary{background:#2f9e44;border-color:#3cb054;color:#fff}
+.bd-media-modal .bd-btn-primary:hover{background:#38b04a;border-color:#4bc45c;color:#fff}
+.bd-media-body{display:grid;grid-template-columns:minmax(320px,1.2fr) minmax(240px,.8fr);gap:10px;min-height:280px}
+.bd-media-left,.bd-media-right{display:flex;flex-direction:column;gap:8px;min-width:0}
+.bd-media-table{width:100%;min-height:220px;max-height:320px;background:#141414;border:1px solid #333;border-radius:6px;color:#eee;box-sizing:border-box;flex:1;display:flex;flex-direction:column;overflow:hidden;outline:none}
+.bd-media-thead{display:grid;grid-template-columns:minmax(0,1fr) 86px 128px;flex-shrink:0;border-bottom:1px solid #333;background:#1a1a1a}
+.bd-media-th{appearance:none;background:transparent;border:none;color:#8e8e8e;font-size:11px;text-align:left;padding:8px 10px;cursor:pointer;display:flex;align-items:center;gap:5px;min-width:0;font-family:inherit;line-height:1.35}
+.bd-media-th:hover{color:#ddd}
+.bd-media-th.is-active{color:#d8d8d8}
+.bd-media-sort{display:inline-block;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;opacity:0;flex-shrink:0}
+.bd-media-th.is-active .bd-media-sort{opacity:1;border-top:5px solid #6ea8ff;border-bottom:0}
+.bd-media-th.is-active.is-asc .bd-media-sort{border-top:0;border-bottom:5px solid #6ea8ff}
+.bd-media-tbody{flex:1;overflow:auto;min-height:0}
+.bd-media-tr{display:grid;grid-template-columns:minmax(0,1fr) 86px 128px;align-items:center;cursor:pointer;border-bottom:1px solid #262626;color:#ddd;font-size:11px;line-height:1.35}
+.bd-media-table.bd-media-nodims .bd-media-thead,
+.bd-media-table.bd-media-nodims .bd-media-tr{grid-template-columns:minmax(0,1fr) 128px}
+.bd-media-tr:hover{background:#222}
+.bd-media-tr.selected{background:#2c2c2c}
+.bd-media-td{padding:8px 10px;min-width:0}
+.bd-media-td-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#eee}
+.bd-media-td-dims,.bd-media-td-time{color:#9a9a9a;white-space:nowrap;font-variant-numeric:tabular-nums}
+.bd-media-empty-row{padding:18px 10px;color:#666;font-size:11px;text-align:center}
+.bd-media-preview{flex:1;min-height:220px;background:#111;border:1px solid #333;border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative}
+.bd-media-preview img,.bd-media-preview video{display:block;width:100%;height:100%;object-fit:contain;background:#000}
+.bd-media-preview-empty{padding:18px;color:#666;font-size:11px;line-height:1.45;text-align:center}
+.bd-media-meta{display:flex;flex-direction:column;gap:4px;color:#9a9a9a;font-size:10px;line-height:1.45;word-break:break-all}
+.bd-media-view-toggle{display:inline-flex;gap:4px}
+.bd-media-view-toggle .bd-btn.active{border-color:#4fff8f;color:#4fff8f}
+.bd-media-gallery{display:none;grid-template-columns:repeat(4,minmax(0,1fr));grid-auto-rows:max-content;align-content:start;align-items:start;gap:8px;width:100%;height:min(48vh,320px);min-height:180px;flex:0 1 auto;overflow-y:scroll;overflow-x:hidden;padding:8px;box-sizing:border-box;background:#141414;border:1px solid #333;border-radius:6px;scrollbar-width:auto;scrollbar-color:#687783 #151515}
+.bd-media-gallery .bd-media-empty-row{grid-column:1/-1}
+.bd-media-left.is-thumbs .bd-media-table{display:none}
+.bd-media-left.is-thumbs .bd-media-gallery{display:grid}
+.bd-media-card{appearance:none;position:relative;min-width:0;padding:4px;background:#161616;border:1px solid #333;border-radius:6px;color:#ddd;cursor:pointer;text-align:left;font:inherit;overflow:hidden}
+.bd-media-card:hover,.bd-media-card.selected{border-color:#4fff8f;background:#202820}
+.bd-media-card img,.bd-media-card video,.bd-media-card .bd-media-card-audio{display:block;width:100%;height:94px;object-fit:cover;background:#090909;border-radius:4px}
+.bd-media-card-audio{display:flex;align-items:center;justify-content:center;color:#9a9a9a;font-size:28px}
+.bd-media-card-has-video::after{content:"▶";position:absolute;right:8px;bottom:22px;width:18px;height:18px;border-radius:9px;background:rgba(0,0,0,.55);color:#fff;font-size:9px;line-height:18px;text-align:center;pointer-events:none}
+.bd-media-card-name{display:block;padding:5px 2px 1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;line-height:1.35}
 .bd-toolbar-wrap{display:flex;flex-direction:column;gap:4px;width:100%}
 .bd-toolbar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;width:100%}
 .bd-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center;flex:1;min-width:0}
@@ -691,12 +1099,22 @@ const STYLES = `
 .bd-frame-jump .bd-frame-total{color:#888;min-width:2.5em}
 .bd-controls{width:100%;box-sizing:border-box;background:#151515;border:1px solid #222;border-radius:0 0 6px 6px;padding:8px 10px;margin-top:0;flex-shrink:0}
 .bd-stage.hidden+.bd-controls{border-radius:6px;border-color:#333;background:#1e1e1e}
-.bd-viewport{width:100%;min-width:100%;overflow-x:auto;border-radius:6px;border:1px solid #111;background:#2a2a2a;box-sizing:border-box;flex-shrink:0}
+.bd-viewport{width:100%;max-width:100%;min-width:0;overflow-x:hidden;overflow-y:hidden;border-radius:6px;border:1px solid #111;background:#2a2a2a;box-sizing:border-box;flex-shrink:0}
+.bd-viewport.bd-zoomed{overflow-x:auto;scrollbar-width:thin;scrollbar-color:#555 #1a1a1a}
+.bd-viewport.bd-zoomed::-webkit-scrollbar{height:10px}
+.bd-viewport.bd-zoomed::-webkit-scrollbar-track{background:#1a1a1a;border-radius:5px}
+.bd-viewport.bd-zoomed::-webkit-scrollbar-thumb{background:#555;border-radius:5px}
+.bd-viewport.bd-zoomed::-webkit-scrollbar-thumb:hover{background:#777}
 /* object-fit:fill + mismatched CSS/bitmap aspect stretches thumbs (esp. under graph zoom). */
 .bd-canvas{display:block;width:100%;min-width:100%;height:auto;cursor:pointer;box-sizing:border-box;flex-shrink:0;object-fit:fill}
 .bd-canvas.bd-grab{cursor:grab}
 .bd-canvas.bd-grabbing{cursor:grabbing}
 .bd-output{width:100%;box-sizing:border-box;display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 8px;background:#1e1e1e;border:1px solid #333;border-radius:6px}
+.bd-out-audio-wrap,.bd-out-source-wrap,.bd-out-preface-wrap{display:inline-flex;align-items:center;gap:6px}
+.bd-out-source-wrap.hidden,.bd-out-preface-wrap.hidden{display:none}
+.bd-output .bd-out-source-wrap label,.bd-output .bd-out-preface-wrap label{display:inline-flex;align-items:center;gap:4px;margin:0;cursor:pointer;line-height:1}
+.bd-output .bd-out-source-wrap input[type=checkbox],.bd-output .bd-out-preface-wrap input[type=checkbox]{margin:0;width:13px;height:13px;flex:0 0 auto;align-self:center;accent-color:#4fff8f}
+.bd-output .bd-out-source-wrap label span,.bd-output .bd-out-preface-wrap label span{line-height:1.2;display:inline-block}
 .bd-split{display:block;width:100%;box-sizing:border-box;min-width:0}
 .bd-r2v-common-hint{margin:0 0 8px;font-size:11px;line-height:1.4;color:#9ab;opacity:.95}
 .bd-panel.bd-r2v-common-panel{border:1px solid #3a4a5a;background:linear-gradient(180deg,#1a222c 0%,#151a20 100%)}
@@ -759,7 +1177,11 @@ const STYLES = `
 .bd-mode{display:flex;border:1px solid #333;border-radius:4px;overflow:hidden}
 .bd-mode button{border:none;background:#222;color:#aaa;padding:6px 12px;font-size:11px;cursor:pointer}
 .bd-mode button.active{background:#333;color:#fff}
-.bd-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.bd-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex-shrink:0}
+.bd-tl-zoom{display:inline-flex;align-items:center;gap:6px;flex-shrink:0}
+.bd-tl-zoom.hidden{display:none!important}
+.bd-btn.bd-btn-zoom.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.35)}
+.bd-tl-zoom-slider{width:128px;height:18px;margin:0;accent-color:#4fff8f;cursor:pointer;flex-shrink:0;touch-action:none}
 .bd-bounds,.bd-timecode{color:#aaa;font-size:11px}
 .bd-timecode{color:#fff;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
 .bd-player .bd-timecode{min-width:88px;font-size:11px;color:#ddd}
@@ -769,8 +1191,10 @@ const STYLES = `
 .bd-panel{width:100%;box-sizing:border-box;background:#222;border:1px solid #111;border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:6px}
 .bd-panel.bd-rv2v-panel,.bd-panel.bd-v2v-panel{background:linear-gradient(165deg,#1c1c1c 0%,#141414 52%,#111 100%);border:1px solid #2c2c2c;border-radius:12px;padding:12px 14px;box-shadow:inset 0 1px 0 rgba(255,255,255,.035);gap:10px}
 .bd-panel.bd-rv2v-panel>b,.bd-panel.bd-v2v-panel>b,.bd-seg-head>b{color:#f0f0f0;font-size:13px;font-weight:650;letter-spacing:.02em}
-.bd-seg-head{display:flex;align-items:baseline;justify-content:flex-start;gap:10px;flex-wrap:wrap;min-width:0}
+.bd-seg-head{display:flex;align-items:center;justify-content:flex-start;gap:10px;flex-wrap:wrap;min-width:0}
 .bd-seg-head>b{flex-shrink:0;margin:0}
+.bd-seg-refsize{display:inline-flex;align-items:center;gap:6px;color:#c8c8c8;font-size:11px;white-space:nowrap;margin-left:auto;flex-shrink:0}
+.bd-seg-refsize select{max-width:132px}
 .bd-seg-continuity{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#9ab;cursor:pointer;user-select:none;flex-shrink:0}
 .bd-seg-continuity input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#6ab0ff}
 .bd-seg-head .bd-meta,.bd-panel.bd-v2v-panel .bd-seg-head .bd-meta,.bd-panel.bd-rv2v-panel .bd-seg-head .bd-meta{color:#8a8a8a;font-size:11px;line-height:1.45;padding:0;min-width:0}
@@ -892,8 +1316,13 @@ const STYLES = `
 .bd-rv2v-layout .bd-ref-audio:hover .x,.bd-rv2v-layout .bd-ref-video:hover .x{display:flex}
 .bd-rv2v-layout .bd-refs-images-wrap.bd-r2v-section,.bd-rv2v-layout .bd-ref-audios-wrap.bd-r2v-section,.bd-rv2v-layout .bd-ref-videos-wrap.bd-r2v-section{display:flex;flex-direction:column;gap:8px}
 .bd-r2v-section-count:empty{display:none}
+.bd-r2v-section-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.bd-r2v-pick-existing{background:transparent;border:1px solid #3a3a3a;color:#c8c8c8;border-radius:6px;padding:2px 8px;font-size:10px;cursor:pointer;line-height:1.4;white-space:nowrap}
+.bd-r2v-pick-existing:hover{border-color:#4fff8f;color:#4fff8f}
+.bd-r2v-pick-existing:disabled{opacity:.4;cursor:not-allowed;border-color:#333;color:#666}
 .bd-prompt-layout:not(.bd-rv2v-layout) .bd-r2v-section-head{display:contents}
-.bd-prompt-layout:not(.bd-rv2v-layout) .bd-r2v-section-count{display:none}
+.bd-prompt-layout:not(.bd-rv2v-layout) .bd-r2v-section-count,
+.bd-prompt-layout:not(.bd-rv2v-layout) .bd-r2v-pick-existing{display:none}
 .bd-continuous-ref{display:flex;align-items:center;gap:6px;font-size:10px;color:#aaa;user-select:none;margin-left:8px}
 .bd-continuous-ref label{display:flex;align-items:center;gap:4px;cursor:pointer}
 .bd-continuous-ref input[type="checkbox"]{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
@@ -922,6 +1351,12 @@ ${REFERENCE_SEMANTICS_STYLES}
 .bd-ref{max-height:64px}
 .bd-rv2v-layout .bd-ref{max-height:none}
 .bd-v2v-layout .bd-prompt,.bd-rv2v-layout .bd-prompt{min-height:140px}
+.bd-media-body{grid-template-columns:1fr}
+.bd-media-preview{min-height:180px}
+.bd-media-thead,.bd-media-tr{grid-template-columns:minmax(0,1fr) 72px 108px}
+.bd-media-table.bd-media-nodims .bd-media-thead,
+.bd-media-table.bd-media-nodims .bd-media-tr{grid-template-columns:minmax(0,1fr) 108px}
+.bd-media-td,.bd-media-th{padding:7px 8px}
 }
 `;
 
@@ -979,6 +1414,34 @@ function formatUploadError(err) {
     const msg = String(err?.message || err);
     if (isUploadSizeError(err)) return t("upload.sizeLimitDetail");
     return msg;
+}
+
+function pickRulerMajorStepSec(pxPerSec) {
+    const pps = Math.max(0.001, Number(pxPerSec) || 0.001);
+    for (const step of RULER_MAJOR_SEC) {
+        if (step * pps >= RULER_MIN_MAJOR_PX) return step;
+    }
+    return RULER_MAJOR_SEC[RULER_MAJOR_SEC.length - 1];
+}
+
+function pickRulerMinorStepSec(majorSec, pxPerSec) {
+    const pps = Math.max(0.001, Number(pxPerSec) || 0.001);
+    for (const div of [10, 5, 4, 2]) {
+        const minor = majorSec / div;
+        if (minor >= 1 && Number.isInteger(minor) && minor * pps >= RULER_MIN_MINOR_PX) {
+            return minor;
+        }
+    }
+    return majorSec;
+}
+
+/** 0, 5, 10 … below one minute; 1:00, 1:30 … at/after 60s. */
+function formatRulerTime(sec) {
+    const s = Math.max(0, Math.round(Number(sec) || 0));
+    if (s < 60) return String(s);
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${String(r).padStart(2, "0")}`;
 }
 
 function formatProbeFps(value) {
@@ -1059,6 +1522,24 @@ function inputViewUrl(relativePath, type = "input") {
     return api.apiURL(`/view?${params.toString()}`);
 }
 
+const MEDIA_PICKER_VIEW_KEY = "minimax.director.mediaPickerView";
+
+function readMediaPickerView() {
+    try {
+        return localStorage.getItem(MEDIA_PICKER_VIEW_KEY) === "thumbs" ? "thumbs" : "list";
+    } catch {
+        return "list";
+    }
+}
+
+function writeMediaPickerView(view) {
+    try {
+        localStorage.setItem(MEDIA_PICKER_VIEW_KEY, view === "thumbs" ? "thumbs" : "list");
+    } catch {
+        /* private mode / quota */
+    }
+}
+
 function refViewUrl(imageFile) {
     return inputViewUrl(imageFile, "input");
 }
@@ -1137,7 +1618,7 @@ function getDirectorUiHeight(editor) {
         return batchH + 100 + advancedHeight;
     }
     if (editor?.getDirectorMode?.() === "fl2v") {
-        let h = getFl2vUiHeight(editor) + 160;
+        let h = getFl2vUiHeight(editor) + 110;
         if (editor?.needsLiveSamplePanel?.()) h += LIVE_SAMPLE_PREVIEW_H + 12;
         return h + advancedHeight;
     }
@@ -1252,7 +1733,12 @@ function moveDirectorDomWidgetToEnd(node) {
     node.widgets.push(widget);
 }
 
-const PERF_WIDGET_ORDER = ["bd_grp_perf", "clear_vram_between_segments", "export_source_images"];
+const PERF_WIDGET_ORDER = [
+    "bd_grp_perf",
+    "clear_vram_between_segments",
+    "clear_vram_before_refine",
+    "clear_vram_before_face_refine",
+];
 
 function moveDirectorPerfWidgetsBeforeTimeline(node) {
     const dom = node?._minimaxDomWidget;
@@ -1276,6 +1762,45 @@ function moveDirectorPerfWidgetsBeforeTimeline(node) {
 function finalizeDirectorWidgetOrder(node) {
     moveDirectorPerfWidgetsBeforeTimeline(node);
     moveDirectorDomWidgetToEnd(node);
+}
+
+const DIRECTOR_DOM_WIDGET_NAME = "minimax_director_ui";
+
+function listDirectorDomWidgets(node) {
+    return (node?.widgets || []).filter((w) => w?.name === DIRECTOR_DOM_WIDGET_NAME);
+}
+
+/** Keep one Director DOM widget; drop extras left by double-wrapped onNodeCreated. */
+function pruneDirectorDomWidgets(node) {
+    if (!node) return null;
+    const dups = listDirectorDomWidgets(node);
+    const keep = dups.find((w) => w.element?.querySelector?.(":scope > .bd-wrap"))
+        || dups.find((w) => w === node._minimaxDomWidget && w?.element)
+        || dups.find((w) => w?.element)
+        || node._minimaxDomWidget
+        || null;
+    if (dups.length > 1) {
+        for (const w of dups) {
+            if (w === keep) continue;
+            const idx = node.widgets.indexOf(w);
+            if (idx !== -1) node.widgets.splice(idx, 1);
+            try { w.onRemove?.(); } catch { /* ignore */ }
+            w.element?.remove?.();
+        }
+    }
+    if (keep) node._minimaxDomWidget = keep;
+    return keep || null;
+}
+
+function destroyDirectorEditor(node) {
+    const ed = node?._minimaxEditor;
+    if (!ed) {
+        if (node) node._minimaxEditor = null;
+        return;
+    }
+    try { ed.destroy(); } catch { /* ignore */ }
+    if (node._minimaxEditor === ed) node._minimaxEditor = null;
+    if (ed.domWidget?._minimaxEditor === ed) ed.domWidget._minimaxEditor = null;
 }
 
 function bindDirectorDomWidgetSizing(node, widget, getEditor) {
@@ -1307,22 +1832,44 @@ function bindDirectorDomWidgetSizing(node, widget, getEditor) {
 function initDirectorEditor(node) {
     // Must not share Bernini's `_directorDomWidget` — their loadedGraphNode mounts on that key.
     if (!isMiniMaxH3DirectorNode(node)) return null;
-    if (node._minimaxEditor) return node._minimaxEditor;
-    const container = node._minimaxDomWidget?.element;
+    const widget = pruneDirectorDomWidgets(node);
+    const container = widget?.element;
     if (!container) return null;
+
+    const existing = node._minimaxEditor || widget._minimaxEditor;
+    if (existing?.root && existing.container === container) {
+        node._minimaxEditor = existing;
+        widget._minimaxEditor = existing;
+        for (const wrap of [...container.querySelectorAll(":scope > .bd-wrap")]) {
+            if (wrap !== existing.root) wrap.remove();
+        }
+        return existing;
+    }
+    // Constructor runs before `_minimaxEditor` is assigned; block re-entrant mounts
+    // from onConfigure / loadedGraphNode / layout callbacks during buildDOM.
+    if (node._minimaxEditorMounting) return existing || null;
+
+    if (existing) destroyDirectorEditor(node);
+
+    node._minimaxEditorMounting = true;
     try {
+        for (const wrap of [...container.querySelectorAll(":scope > .bd-wrap")]) wrap.remove();
         hookTaskTypeWidget(node);
-        node._minimaxEditor = new MiniMaxH3DirectorEditor(node, container, node._minimaxDomWidget);
+        const editor = new MiniMaxH3DirectorEditor(node, container, widget);
+        node._minimaxEditor = editor;
+        widget._minimaxEditor = editor;
         ensureDirectorDomWidgetWidth(node);
-        bindDirectorDomWidgetSizing(node, node._minimaxDomWidget, () => node._minimaxEditor);
+        bindDirectorDomWidgetSizing(node, widget, () => node._minimaxEditor);
         // Only clamp true runaway; never steal normal user/workflow height (#7).
-        healOversizedDirectorNode(node, node._minimaxEditor);
-        syncDirectorNodeSize(node, node._minimaxEditor);
-        scheduleDirectorLayoutSettle(node._minimaxEditor);
-        return node._minimaxEditor;
+        healOversizedDirectorNode(node, editor);
+        syncDirectorNodeSize(node, editor);
+        scheduleDirectorLayoutSettle(editor);
+        return editor;
     } catch (err) {
         console.error("[MiniMax H3Director] UI init failed:", err);
-        return null;
+        return node._minimaxEditor || null;
+    } finally {
+        node._minimaxEditorMounting = false;
     }
 }
 
@@ -1450,11 +1997,17 @@ function parseTimeline(raw, totalFrames, fps) {
             longEdge: 848, width: 848, height: 480,
             maxExportFrames: 0, exportMode: "all",
             audioMode: "generate",
+            exportSourceImages: false,
+            exportPreFaceRefine: false,
+            refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
+            continuityMode: DEFAULT_CONTINUITY_MODE,
+            continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
+            continuityKeepTail: true,
         },
         runSelectEnabled: false,
         runSelection: [],
-        liveTaePreview: true,
+        liveTaePreview: false,
         batchDetailMode: "solo",
         segments: [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [], refAudios: [], referenceVideo: {} }],
     };
@@ -1512,8 +2065,16 @@ function parseTimeline(raw, totalFrames, fps) {
             maxExportFrames: data.output?.maxExportFrames ?? data.output?.max_export_frames ?? 0,
             exportMode: data.output?.exportMode ?? data.output?.export_mode ?? "all",
             audioMode: normalizeAudioMode(data.output?.audioMode ?? data.output?.audio_mode),
+            exportSourceImages: data.output?.exportSourceImages === true
+                || data.output?.export_source_images === true,
+            exportPreFaceRefine: data.output?.exportPreFaceRefine === true
+                || data.output?.export_pre_face_refine === true,
+            refImageSize: normalizeRefImageSize(data.output?.refImageSize ?? data.output?.ref_image_size),
             continuityEnabled: data.output?.continuityEnabled ?? data.output?.continuity_enabled,
             continuityOverlapFrames: data.output?.continuityOverlapFrames ?? data.output?.continuity_overlap_frames,
+            continuityMode: data.output?.continuityMode ?? data.output?.continuity_mode,
+            continuityRedraw: data.output?.continuityRedraw ?? data.output?.continuity_redraw,
+            continuityKeepTail: data.output?.continuityKeepTail ?? data.output?.continuity_keep_tail,
         });
         // Infer aspectRatio from saved width/height when older payloads omitted the label.
         if (!data.output.aspectRatio && data.output.width > 0 && data.output.height > 0) {
@@ -1555,8 +2116,8 @@ function parseTimeline(raw, totalFrames, fps) {
         }
         data.runSelectEnabled = !!data.runSelectEnabled;
         data.runSelection = Array.isArray(data.runSelection) ? data.runSelection.map((i) => parseInt(i, 10)).filter((i) => i >= 0) : [];
-        // Default on when missing (older timelines).
-        data.liveTaePreview = data.liveTaePreview !== false && data.live_tae_preview !== false;
+        // Default off when missing. Explicit true keeps in-node TAE + segment playback.
+        data.liveTaePreview = data.liveTaePreview === true || data.live_tae_preview === true;
         const detailMode = data.batchDetailMode ?? data.batch_detail_mode;
         data.batchDetailMode = detailMode === "all" ? "all" : "solo";
         if (data.timelineMode === "fl2v" || resolveTaskKey(data.global?.taskType || "") === "fl2v") {
@@ -1877,6 +2438,7 @@ class MiniMaxH3DirectorEditor {
         this.container = container;
         this.domWidget = domWidget;
         this.zoom = 1;
+        this.zoomEnabled = false;
         this.selectedIndex = 0;
         /** @type {number|null} Selected editable split-point frame (logical). */
         this.selectedSplitFrame = null;
@@ -1934,6 +2496,25 @@ class MiniMaxH3DirectorEditor {
         this.heightWidget = this.widget("height");
         this.refMaxWidget = this.widget("ref_max_size");
 
+        // Refresh the external-group witness while the prompt is built, so an
+        // upstream edit made after the last timeline write can never leave a
+        // stale witness in the submitted timeline_data.
+        if (this.timelineWidget && !this.timelineWidget._mmxWitnessSerialized) {
+            const widget = this.timelineWidget;
+            const previous = typeof widget.serializeValue === "function"
+                ? widget.serializeValue
+                : null;
+            widget._mmxWitnessSerialized = true;
+            widget.serializeValue = function (targetNode) {
+                const raw = previous
+                    ? previous.call(widget, targetNode)
+                    : widget.value;
+                return typeof raw === "string"
+                    ? injectExternalGroupsWitness(targetNode ?? node, raw)
+                    : raw;
+            };
+        }
+
         const initTotal = Math.max(0, parseInt(this.totalFramesWidget?.value || 124, 10));
         const initFps = coerceTimelineFps(this.frameRateWidget?.value || 24);
         this.timeline = parseTimeline(this.timelineWidget?.value, initTotal, initFps);
@@ -1942,6 +2523,7 @@ class MiniMaxH3DirectorEditor {
         this._unsubLocale = onLocaleChange(() => this.applyLocale());
         this.applyLocale();
         this._directorMode = getDirectorMode(this.taskTypeWidget?.value);
+        this._taskKey = resolveTaskKey(this.taskTypeWidget?.value);
         if (this._directorMode === "video") {
             this.restoreVideoFromTimeline();
         } else if (this._directorMode === "prompt_batch" || this._directorMode === "image_batch") {
@@ -2043,6 +2625,7 @@ class MiniMaxH3DirectorEditor {
             s.nodeId ?? "",
             Number(s.durationSec) || 0,
             s.prompt || "",
+            s.refImageSize || "",
             s.firstImageFile || "",
             s.lastImageFile || "",
             (s.refImages || []).map((r) => `${r.index}:${r.imageFile || ""}`).join(","),
@@ -2164,6 +2747,7 @@ class MiniMaxH3DirectorEditor {
                 }
                 return newBatchSegment({
                     ...(matched?.id ? { id: matched.id } : {}),
+                    frameRate: this.getFrameRate(),
                     durationSec: spec.durationSec ?? defaultDurationSec(taskKey),
                     prompt,
                     negativePrompt: matched?.negativePrompt ?? "",
@@ -2177,6 +2761,9 @@ class MiniMaxH3DirectorEditor {
                     previewB64: matched?.previewB64 || "",
                     previewFrames: matched?.previewFrames || [],
                     previewFps: matched?.previewFps,
+                    refImageSize: spec.refImageSize
+                        ? resolveSegmentRefImageSize({ refImageSize: spec.refImageSize })
+                        : resolveSegmentRefImageSize(matched, this.timeline?.output),
                     ...(matched?.runEnabled != null ? { runEnabled: matched.runEnabled } : {}),
                 });
             });
@@ -2216,7 +2803,7 @@ class MiniMaxH3DirectorEditor {
      */
     _measureDrawWidth() {
         if (this.isPlaying && this._playCanvasWidth > 0) return this._playCanvasWidth;
-        if (this.zoom > 1) {
+        if (this.getTimelineZoom() > 1) {
             const zoomed = this.canvas?.clientWidth || this.canvas?.offsetWidth || 0;
             if (zoomed > 0) return zoomed;
         }
@@ -2402,8 +2989,11 @@ class MiniMaxH3DirectorEditor {
                         refVideos: clean.refVideos || [],
                         genImage: clean.genImage || { imageFile: "" },
                         loras: Array.isArray(clean.loras) ? clean.loras : [],
+                        startImage: clean.startImage || null,
+                        endImage: clean.endImage || null,
                         // Persist per-segment「引用上段」(default true when unset).
                         continuityFromPrev: isSegmentContinuityFromPrev(clean, i),
+                        refImageSize: resolveSegmentRefImageSize(clean, this.timeline.output),
                     };
                 }),
                 ...this._runSelectionPayload(),
@@ -2537,7 +3127,9 @@ class MiniMaxH3DirectorEditor {
         if (this.isFl2vMode?.()) flushFl2vPromptDraft(this);
         this.syncFromWidgets();
         const oldValue = this.timelineWidget.value;
-        const nextValue = JSON.stringify(this.buildTimelinePayload());
+        const payload = this.buildTimelinePayload();
+        attachExternalGroupsWitness(this.node, payload);
+        const nextValue = JSON.stringify(payload);
         this.timelineWidget.value = nextValue;
         if (notifyGraph && oldValue !== nextValue) {
             notifyWidgetChanged(this.node, this.timelineWidget, oldValue);
@@ -2562,6 +3154,7 @@ class MiniMaxH3DirectorEditor {
                 <div class="bd-actions">
                     <button type="button" class="bd-btn bd-btn-primary hidden" data-a="r2v-add-group" data-i18n="toolbar.addRefGroup" data-i18n-title="tooltip.addRefGroup">添加素材组</button>
                     <button type="button" class="bd-btn bd-btn-primary" data-a="video" data-i18n="toolbar.uploadVideo">上传视频</button>
+                    <button type="button" class="bd-btn" data-a="video-existing" data-i18n="mediaPicker.pickExistingVideo" data-i18n-title="mediaPicker.pickExistingHint">选已有视频</button>
                     <button type="button" class="bd-btn bd-btn-primary hidden" data-a="fl2v-add-shot" data-i18n="toolbar.addShot" data-i18n-title="tooltip.addShot">添加一组</button>
                     <button type="button" class="bd-btn" data-a="video-append" data-i18n="toolbar.appendVideo" data-i18n-title="tooltip.appendVideo">追加视频</button>
                     <button type="button" class="bd-btn" data-a="split" data-i18n="toolbar.split">+ 分割</button>
@@ -2583,6 +3176,12 @@ class MiniMaxH3DirectorEditor {
                     <span class="bd-video-tag" data-r="video-name" data-i18n="toolbar.noVideo">未上传视频</span>
                 </div>
                 <div class="bd-right">
+                    <div class="bd-tl-zoom" data-r="tl-zoom">
+                        <button type="button" class="bd-btn bd-btn-zoom" data-a="zoom-toggle" data-i18n="toolbar.timelineZoom" data-i18n-title="toolbar.timelineZoomTitle">放大</button>
+                        <input type="range" class="bd-tl-zoom-slider hidden" data-r="zoom" min="1" max="10" step="any" value="1" data-i18n-title="tooltip.timelineZoom">
+                    </div>
+                    <button type="button" class="bd-btn" data-a="pack-import" data-i18n="toolbar.importPack" data-i18n-title="tooltip.importPack">导入导演包</button>
+                    <button type="button" class="bd-btn" data-a="pack-export" data-i18n="toolbar.exportPack" data-i18n-title="tooltip.exportPack">导出导演包</button>
                     <button type="button" class="bd-btn" data-a="lang-toggle" data-i18n="toolbar.langToggle" data-i18n-title="toolbar.langToggleTitle">EN</button>
                     <div class="bd-bounds" data-r="bounds">起点: 0.00 | 终点: -</div>
                     <div class="bd-timecode" data-r="timecode">0.00s</div>
@@ -2626,11 +3225,6 @@ class MiniMaxH3DirectorEditor {
                 </span>
                 <div class="bd-timecode" data-r="player-timecode">0.00 / 0.00</div>
                 <input type="range" class="bd-seek" data-r="seek" min="0" value="0" step="1">
-                <div class="bd-zoom bd-row">
-                    <button type="button" class="bd-icon-btn" data-a="zoom-out">−</button>
-                    <input type="range" data-r="zoom" min="1" max="10" step="0.25" value="1" style="width:80px">
-                    <button type="button" class="bd-icon-btn" data-a="zoom-in">+</button>
-                </div>
             </div>`;
         this.mainBody.appendChild(controls);
 
@@ -2693,6 +3287,18 @@ class MiniMaxH3DirectorEditor {
                     <option value="mute" data-i18n="output.audio.mute">静音</option>
                 </select>
             </span>
+            <span class="bd-out-source-wrap hidden" data-r="out-source-wrap" data-i18n-title="widget.tooltip.exportSourceImages">
+                <label>
+                    <input type="checkbox" data-r="out-export-source">
+                    <span data-i18n="output.exportSourceImages">输出原片</span>
+                </label>
+            </span>
+            <span class="bd-out-preface-wrap" data-r="out-preface-wrap" data-i18n-title="widget.tooltip.exportPreFaceRefine">
+                <label>
+                    <input type="checkbox" data-r="out-export-preface">
+                    <span data-i18n="output.exportPreFaceRefine">输出修脸前</span>
+                </label>
+            </span>
             <span class="bd-meta" data-r="out-preview">—</span>
             <span class="bd-meta hidden" data-r="out-hint"></span>
             <label data-i18n="output.exportMode.label" data-i18n-title="tooltip.exportMode">导出方式</label>
@@ -2713,8 +3319,23 @@ class MiniMaxH3DirectorEditor {
                     <option value="39">39</option>
                     <option value="56">56</option>
                 </select>
+                <span data-r="segment-continuity-mode-wrap" hidden>
+                    <span class="bd-meta" data-i18n="output.continuityMode">引导方式</span>
+                    <select class="bd-num" data-r="segment-continuity-mode" style="width:96px" data-i18n-title="tooltip.continuityMode">
+                        <option value="guide" data-i18n="output.continuityMode.guide">引导</option>
+                        <option value="continue" data-i18n="output.continuityMode.continue">引导+重绘</option>
+                    </select>
+                    <span data-r="segment-continuity-redraw-wrap" hidden>
+                        <span class="bd-meta" data-i18n="output.continuityRedraw">重绘幅度</span>
+                        <input type="number" class="bd-num" data-r="segment-continuity-redraw" min="0" max="0.95" step="0.05" value="0.10" style="width:56px" data-i18n-title="tooltip.continuityRedraw">
+                    </span>
+                </span>
+                <label data-r="segment-continuity-keep-tail-wrap" hidden data-i18n-title="tooltip.continuityKeepTail">
+                    <input type="checkbox" data-r="segment-continuity-keep-tail" checked>
+                    <span data-i18n="output.continuityKeepTail">保完整</span>
+                </label>
             </span>
-            <button type="button" class="bd-btn bd-btn-live-preview active" data-a="live-tae-preview" data-i18n="toolbar.liveTaePreview" data-i18n-title="tooltip.liveTaePreview">实时预览</button>`;
+            <button type="button" class="bd-btn bd-btn-live-preview" data-a="live-tae-preview" data-i18n="toolbar.liveTaePreview" data-i18n-title="tooltip.liveTaePreview">实时预览</button>`;
         this.mainBody.appendChild(outputBar);
         this.outputBarEl = outputBar;
 
@@ -2760,21 +3381,30 @@ class MiniMaxH3DirectorEditor {
                             <div class="bd-refs-images-wrap" data-r="global-refs-images-wrap">
                                 <div class="bd-r2v-section-head" data-r="global-refs-head">
                                     <span class="bd-label bd-r2v-section-title" data-r="global-refs-label" data-i18n="panel.refImages">参考图 (图片1–9)</span>
-                                    <span class="bd-r2v-section-count" data-r="global-refs-count"></span>
+                                    <span class="bd-r2v-section-actions">
+                                        <button type="button" class="bd-r2v-pick-existing" data-r="global-refs-pick" data-i18n="mediaPicker.pickExisting" data-i18n-title="mediaPicker.pickExistingHint">选已有</button>
+                                        <span class="bd-r2v-section-count" data-r="global-refs-count"></span>
+                                    </span>
                                 </div>
                                 <div class="bd-refs" data-r="global-refs"></div>
                             </div>
                             <div class="bd-ref-videos-wrap hidden" data-r="global-ref-videos-wrap">
                                 <div class="bd-r2v-section-head" data-r="global-videos-head">
                                     <span class="bd-label bd-r2v-section-title" data-i18n="batch.r2v.sectionVideos">参考视频</span>
-                                    <span class="bd-r2v-section-count" data-r="global-videos-count"></span>
+                                    <span class="bd-r2v-section-actions">
+                                        <button type="button" class="bd-r2v-pick-existing" data-r="global-videos-pick" data-i18n="mediaPicker.pickExisting" data-i18n-title="mediaPicker.pickExistingHint">选已有</button>
+                                        <span class="bd-r2v-section-count" data-r="global-videos-count"></span>
+                                    </span>
                                 </div>
                                 <div class="bd-ref-videos" data-r="global-ref-videos"></div>
                             </div>
                             <div class="bd-ref-audios-wrap hidden" data-r="global-ref-audios-wrap">
                                 <div class="bd-r2v-section-head" data-r="global-audios-head">
                                     <span class="bd-label bd-r2v-section-title" data-i18n="batch.r2v.sectionAudios">参考音频</span>
-                                    <span class="bd-r2v-section-count" data-r="global-audios-count"></span>
+                                    <span class="bd-r2v-section-actions">
+                                        <button type="button" class="bd-r2v-pick-existing" data-r="global-audios-pick" data-i18n="mediaPicker.pickExisting" data-i18n-title="mediaPicker.pickExistingHint">选已有</button>
+                                        <span class="bd-r2v-section-count" data-r="global-audios-count"></span>
+                                    </span>
                                 </div>
                                 <div class="bd-ref-audios" data-r="global-ref-audios"></div>
                             </div>
@@ -2809,20 +3439,36 @@ class MiniMaxH3DirectorEditor {
                         <span data-i18n="batch.continuityFromPrev">引用上段</span>
                     </label>
                     <div class="bd-meta" data-r="seg-info"></div>
+                    <label class="bd-seg-refsize hidden" data-r="seg-ref-image-size-wrap" hidden data-i18n-title="tooltip.refImageSize">
+                        <span data-i18n="output.refImageSize.label">参考图尺寸</span>
+                        <select class="bd-select" data-r="seg-ref-image-size">
+                            <option value="match" data-i18n="output.refImageSize.match">match</option>
+                            <option value="1024" data-i18n="output.refImageSize.1024">最长边 1024</option>
+                            <option value="1280" data-i18n="output.refImageSize.1280">最长边 1280</option>
+                            <option value="1536" data-i18n="output.refImageSize.1536">最长边 1536</option>
+                            <option value="max" data-i18n="output.refImageSize.max">max</option>
+                        </select>
+                    </label>
                 </div>
                 <div class="bd-prompt-layout" data-r="seg-prompt-layout">
                     <div class="bd-refs-col" data-r="seg-refs-col">
                         <div class="bd-refs-images-wrap" data-r="seg-refs-images-wrap">
                             <div class="bd-r2v-section-head" data-r="seg-refs-head">
                                 <span class="bd-label bd-r2v-section-title" data-r="seg-refs-label" data-i18n="panel.segmentRefImages">片段参考图 (图片1–9)</span>
-                                <span class="bd-r2v-section-count" data-r="seg-refs-count"></span>
+                                <span class="bd-r2v-section-actions">
+                                    <button type="button" class="bd-r2v-pick-existing" data-r="seg-refs-pick" data-i18n="mediaPicker.pickExisting" data-i18n-title="mediaPicker.pickExistingHint">选已有</button>
+                                    <span class="bd-r2v-section-count" data-r="seg-refs-count"></span>
+                                </span>
                             </div>
                             <div class="bd-refs" data-r="seg-refs"></div>
                         </div>
                         <div class="bd-ref-audios-wrap hidden" data-r="seg-ref-audios-wrap">
                             <div class="bd-r2v-section-head" data-r="seg-audios-head">
                                 <span class="bd-label bd-r2v-section-title" data-i18n="batch.r2v.sectionAudios">参考音频</span>
-                                <span class="bd-r2v-section-count" data-r="seg-audios-count"></span>
+                                <span class="bd-r2v-section-actions">
+                                    <button type="button" class="bd-r2v-pick-existing" data-r="seg-audios-pick" data-i18n="mediaPicker.pickExisting" data-i18n-title="mediaPicker.pickExistingHint">选已有</button>
+                                    <span class="bd-r2v-section-count" data-r="seg-audios-count"></span>
+                                </span>
                             </div>
                             <div class="bd-ref-audios" data-r="seg-ref-audios"></div>
                         </div>
@@ -2881,14 +3527,19 @@ class MiniMaxH3DirectorEditor {
             </div>`;
         this.root.appendChild(runStatus);
 
-        this.container.appendChild(this.root);
+        if (this.container) {
+            for (const wrap of [...this.container.querySelectorAll(":scope > .bd-wrap")]) {
+                wrap.remove();
+            }
+            this.container.appendChild(this.root);
+        }
 
         this._previewVideo = document.createElement("video");
         this._previewVideo.crossOrigin = "anonymous";
         this._previewVideo.muted = true;
         this._previewVideo.playsInline = true;
         this._previewVideo.preload = "auto";
-        this._previewVideo.style.cssText = "position:fixed;width:0;height:0;opacity:0;pointer-events:none";
+        this._previewVideo.style.cssText = "position:fixed;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none";
         document.body.appendChild(this._previewVideo);
 
         this._thumbCanvas = document.createElement("canvas");
@@ -2902,6 +3553,8 @@ class MiniMaxH3DirectorEditor {
         this.frameInputEl = this.root.querySelector('[data-r="frame-input"]');
         this.frameTotalEl = this.root.querySelector('[data-r="frame-total"]');
         this.seekBar = this.root.querySelector('[data-r="seek"]');
+        this.tlZoomWrap = this.root.querySelector('[data-r="tl-zoom"]');
+        this.zoomToggleBtn = this.root.querySelector('[data-a="zoom-toggle"]');
         this.zoomSlider = this.root.querySelector('[data-r="zoom"]');
         this.stageEl = this.root.querySelector('[data-r="video-stage"]');
         this.stageVideo = this.root.querySelector('[data-r="stage-video"]');
@@ -2945,6 +3598,8 @@ class MiniMaxH3DirectorEditor {
         this.segLabel = this.root.querySelector('[data-r="seg-label"]');
         this.segContinuityFromPrevWrap = this.root.querySelector('[data-r="seg-continuity-from-prev-wrap"]');
         this.segContinuityFromPrevCb = this.root.querySelector('[data-r="seg-continuity-from-prev"]');
+        this.segRefImageSizeWrap = this.root.querySelector('[data-r="seg-ref-image-size-wrap"]');
+        this.segRefImageSize = this.root.querySelector('[data-r="seg-ref-image-size"]');
         this.segInfo = this.root.querySelector('[data-r="seg-info"]');
         this.segPrompt = this.root.querySelector('[data-r="seg-prompt"]');
         this.segNegative = this.root.querySelector('[data-r="seg-negative"]');
@@ -2967,6 +3622,7 @@ class MiniMaxH3DirectorEditor {
         this.genSegFc = this.root.querySelector('[data-r="gen-seg-fc"]');
         this.controlsBar = this.root.querySelector(".bd-controls");
         this.btnVideo = this.root.querySelector('[data-a="video"]');
+        this.btnVideoExisting = this.root.querySelector('[data-a="video-existing"]');
         this.btnFl2vAddShot = this.root.querySelector('[data-a="fl2v-add-shot"]');
         this.btnVideoAppend = this.root.querySelector('[data-a="video-append"]');
         this.outHint = this.root.querySelector('[data-r="out-hint"]');
@@ -2982,11 +3638,21 @@ class MiniMaxH3DirectorEditor {
         this.fpsInput = this.root.querySelector('[data-r="timeline-fps"]');
         this.outAudioWrap = this.root.querySelector('[data-r="out-audio-wrap"]');
         this.outAudioMode = this.root.querySelector('[data-r="out-audio-mode"]');
+        this.exportSourceImagesWrap = this.root.querySelector('[data-r="out-source-wrap"]');
+        this.exportSourceImagesCb = this.root.querySelector('[data-r="out-export-source"]');
+        this.exportPreFaceRefineWrap = this.root.querySelector('[data-r="out-preface-wrap"]');
+        this.exportPreFaceRefineCb = this.root.querySelector('[data-r="out-export-preface"]');
         this.outMaxFrames = this.root.querySelector('[data-r="out-max-frames"]');
         this.outExportMode = this.root.querySelector('[data-r="out-export-mode"]');
         this.segmentContinuityWrap = this.root.querySelector('[data-r="segment-continuity-wrap"]');
         this.segmentContinuityCb = this.root.querySelector('[data-r="segment-continuity-cb"]');
         this.segmentContinuityOverlap = this.root.querySelector('[data-r="segment-continuity-overlap"]');
+        this.segmentContinuityModeWrap = this.root.querySelector('[data-r="segment-continuity-mode-wrap"]');
+        this.segmentContinuityMode = this.root.querySelector('[data-r="segment-continuity-mode"]');
+        this.segmentContinuityRedrawWrap = this.root.querySelector('[data-r="segment-continuity-redraw-wrap"]');
+        this.segmentContinuityRedraw = this.root.querySelector('[data-r="segment-continuity-redraw"]');
+        this.segmentContinuityKeepTailWrap = this.root.querySelector('[data-r="segment-continuity-keep-tail-wrap"]');
+        this.segmentContinuityKeepTail = this.root.querySelector('[data-r="segment-continuity-keep-tail"]');
         this.outPreview = this.root.querySelector('[data-r="out-preview"]');
         this.runStatusEl = this.root.querySelector('[data-r="run-status"]');
         this.runTitleEl = this.root.querySelector('[data-r="run-title"]');
@@ -3027,6 +3693,7 @@ class MiniMaxH3DirectorEditor {
             el.onclick = (e) => { stopDomEvent(e); fn(); };
         };
         bind('[data-a="video"]', () => this.pickVideoFile());
+        bind('[data-a="video-existing"]', () => { void this.pickExistingVideoFile(); });
         bind('[data-a="fl2v-add-shot"]', () => openFl2vUpload(this));
         bind('[data-a="r2v-add-group"]', () => addImageBatchGroup(this));
         bind('[data-a="video-append"]', () => this.pickAppendVideoFile());
@@ -3040,13 +3707,13 @@ class MiniMaxH3DirectorEditor {
         bind('[data-a="mode-global"]', () => this.setEditMode("global"));
         bind('[data-a="mode-segment"]', () => this.setEditMode("segment"));
         bind('[data-a="lang-toggle"]', () => toggleLocale());
+        bind('[data-a="zoom-toggle"]', () => this.toggleTimelineZoom());
+        bindPackActions(this);
         bind('[data-a="play"]', () => this.togglePlay());
         bind('[data-a="loop"]', () => this.toggleLoop());
         bind('[data-a="live-tae-preview"]', () => this.toggleLiveTaePreview());
         bind('[data-a="frame-prev"]', () => this.stepFrame(-1));
         bind('[data-a="frame-next"]', () => this.stepFrame(1));
-        bind('[data-a="zoom-in"]', () => this.adjustZoom(0.5));
-        bind('[data-a="zoom-out"]', () => this.adjustZoom(-0.5));
         this.refreshLiveTaePreviewButton();
         this.updateLiveSamplePanel();
 
@@ -3092,7 +3759,68 @@ class MiniMaxH3DirectorEditor {
                 this.frameInputEl?.select();
             });
         }
-        this.zoomSlider.oninput = () => { this.zoom = +this.zoomSlider.value; this.applyZoomWidth(); this.scheduleRender(); };
+        if (this.zoomSlider) {
+            const zoomMin = () => Number(this.zoomSlider.min) || 1;
+            const zoomMax = () => Number(this.zoomSlider.max) || 10;
+            const applySliderZoom = () => {
+                if (!this.zoomEnabled) return;
+                this.zoom = clamp(+this.zoomSlider.value, zoomMin(), zoomMax());
+                this.applyZoomWidth();
+                this.scheduleRender();
+            };
+            const zoomFromClientX = (clientX) => {
+                const rect = this.zoomSlider.getBoundingClientRect();
+                const min = zoomMin();
+                const max = zoomMax();
+                const t = rect.width > 1 ? clamp((clientX - rect.left) / rect.width, 0, 1) : 0;
+                return min + t * (max - min);
+            };
+            const scrubZoom = (e) => {
+                this.zoomSlider.value = String(zoomFromClientX(e.clientX));
+                applySliderZoom();
+            };
+            this.zoomSlider.oninput = applySliderZoom;
+            const onZoomPointerDown = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation?.();
+                if (!this.zoomEnabled) return;
+                if (e.button != null && e.button !== 0) return;
+                this._zoomPointerId = e.pointerId;
+                try { this.zoomSlider.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+                this.zoomSlider.focus({ preventScroll: true });
+                scrubZoom(e);
+            };
+            const onZoomPointerMove = (e) => {
+                if (this._zoomPointerId == null || e.pointerId !== this._zoomPointerId) return;
+                e.preventDefault();
+                e.stopPropagation();
+                scrubZoom(e);
+            };
+            const onZoomPointerUp = (e) => {
+                if (this._zoomPointerId == null || e.pointerId !== this._zoomPointerId) return;
+                e.stopPropagation();
+                this._zoomPointerId = null;
+                try { this.zoomSlider.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+            };
+            this.zoomSlider.addEventListener("pointerdown", onZoomPointerDown, true);
+            this.zoomSlider.addEventListener("pointermove", onZoomPointerMove);
+            this.zoomSlider.addEventListener("pointerup", onZoomPointerUp, true);
+            this.zoomSlider.addEventListener("pointercancel", onZoomPointerUp, true);
+            this.zoomSlider.addEventListener("mousedown", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+            }, true);
+            this.zoomSlider.addEventListener("wheel", (e) => e.stopPropagation(), true);
+        }
+        this.viewport?.addEventListener("wheel", (e) => {
+            if (this.getTimelineZoom() <= 1) return;
+            e.stopPropagation();
+            if (e.deltaX === 0 && e.deltaY !== 0) {
+                e.preventDefault();
+                this.viewport.scrollLeft += e.deltaY;
+            }
+        }, { passive: false });
         if (this.runSelectAllCb) {
             this.runSelectAllCb.onchange = (e) => {
                 stopDomEvent(e);
@@ -3194,6 +3922,32 @@ class MiniMaxH3DirectorEditor {
         if (this.outAudioMode) {
             this.outAudioMode.onchange = () => this.onOutputField("audioMode", this.outAudioMode.value);
         }
+        if (this.exportSourceImagesCb) {
+            this.exportSourceImagesCb.onchange = () => {
+                this.timeline.output = this.timeline.output || {};
+                this.timeline.output.exportSourceImages = !!this.exportSourceImagesCb.checked;
+                const w = this.widget("export_source_images");
+                if (w) w.value = this.timeline.output.exportSourceImages;
+                this.commit(true);
+            };
+        }
+        if (this.exportPreFaceRefineCb) {
+            this.exportPreFaceRefineCb.onchange = () => {
+                this.timeline.output = this.timeline.output || {};
+                this.timeline.output.exportPreFaceRefine = !!this.exportPreFaceRefineCb.checked;
+                const w = this.widget("export_pre_face_refine");
+                if (w) w.value = this.timeline.output.exportPreFaceRefine;
+                this.commit(true);
+            };
+        }
+        if (this.segRefImageSize) {
+            this.segRefImageSize.onchange = () => {
+                const seg = this.timeline.segments?.[this.selectedIndex];
+                if (!seg) return;
+                seg.refImageSize = normalizeRefImageSize(this.segRefImageSize.value);
+                this.commit(true);
+            };
+        }
         if (this.segmentContinuityCb) {
             this.segmentContinuityCb.onchange = () => {
                 this.onOutputField("continuityEnabled", this.segmentContinuityCb.checked);
@@ -3206,6 +3960,27 @@ class MiniMaxH3DirectorEditor {
             this.segmentContinuityOverlap.oninput = applyOverlap;
             this.segmentContinuityOverlap.addEventListener("keydown", (e) => e.stopPropagation());
             this.segmentContinuityOverlap.addEventListener("keyup", (e) => e.stopPropagation());
+        }
+        if (this.segmentContinuityMode) {
+            this.segmentContinuityMode.onchange = () => {
+                this.onOutputField("continuityMode", this.segmentContinuityMode.value);
+                this.updateSegmentContinuityUI();
+            };
+            this.segmentContinuityMode.addEventListener("keydown", (e) => e.stopPropagation());
+        }
+        if (this.segmentContinuityRedraw) {
+            const applyRedraw = () => this.onOutputField(
+                "continuityRedraw",
+                snapContinuityRedraw(this.segmentContinuityRedraw.value),
+            );
+            this.segmentContinuityRedraw.onchange = applyRedraw;
+            this.segmentContinuityRedraw.addEventListener("keydown", (e) => e.stopPropagation());
+            this.segmentContinuityRedraw.addEventListener("keyup", (e) => e.stopPropagation());
+        }
+        if (this.segmentContinuityKeepTail) {
+            this.segmentContinuityKeepTail.onchange = () => {
+                this.onOutputField("continuityKeepTail", this.segmentContinuityKeepTail.checked);
+            };
         }
         if (this.segContinuityFromPrevCb) {
             this.segContinuityFromPrevCb.onchange = () => {
@@ -3222,6 +3997,26 @@ class MiniMaxH3DirectorEditor {
 
         this.genGlobalImg?.addEventListener("click", (e) => { stopDomEvent(e); this.pickGenSrcImage(true); });
         this.genSegImg?.addEventListener("click", (e) => { stopDomEvent(e); this.pickGenSrcImage(false); });
+        this.root.querySelector('[data-r="global-refs-pick"]')?.addEventListener("click", (e) => {
+            stopDomEvent(e);
+            void this.pickExistingRef(true);
+        });
+        this.root.querySelector('[data-r="seg-refs-pick"]')?.addEventListener("click", (e) => {
+            stopDomEvent(e);
+            void this.pickExistingRef(false);
+        });
+        this.root.querySelector('[data-r="global-videos-pick"]')?.addEventListener("click", (e) => {
+            stopDomEvent(e);
+            void this.pickExistingR2vCommonVideo();
+        });
+        this.root.querySelector('[data-r="global-audios-pick"]')?.addEventListener("click", (e) => {
+            stopDomEvent(e);
+            void this.pickExistingRefAudio(true);
+        });
+        this.root.querySelector('[data-r="seg-audios-pick"]')?.addEventListener("click", (e) => {
+            stopDomEvent(e);
+            void this.pickExistingRefAudio(false);
+        });
         this.genDefaultFc?.addEventListener("change", () => this.onGenDefaultFcChange());
         this.genSegFc?.addEventListener("change", () => this.onGenSegFcChange());
 
@@ -3345,7 +4140,7 @@ class MiniMaxH3DirectorEditor {
             if (types.includes("application/x-minimax-ref-slot")) return;
             if (types.includes("application/x-minimax-fl2v-slot")) return;
             if (types.includes("application/x-minimax-fl2v-shot")) return;
-            if (e.target.closest?.(".bd-ref, .bd-batch-ref, .bd-fl2v-slot, .bd-fl2v-shot")) return;
+            if (e.target.closest?.(".bd-ref, .bd-batch-ref, .bd-batch-src, .bd-batch-video, .bd-batch-audio, .bd-batch-videos, .bd-batch-audios, .bd-fl2v-slot, .bd-fl2v-shot")) return;
             const f = e.dataTransfer.files?.[0];
             if (f?.type.startsWith("video/")) this.loadVideoFile(f);
             else if (f?.type.startsWith("image/")) {
@@ -3370,6 +4165,14 @@ class MiniMaxH3DirectorEditor {
         this._unsubLocale?.();
         this._unsubLocale = null;
         this._closeBdModal();
+        teardownPromptImageMentions(this.root);
+        this._clearPreviewVideos(true);
+        this._previewVideos?.clear();
+        try {
+            this._previewVideo?.pause();
+            this._previewVideo?.removeAttribute("src");
+            this._previewVideo?.load();
+        } catch { /* ignore */ }
         this._previewVideo?.remove();
         this._previewVideo = null;
         window.removeEventListener("mousemove", this._onMouseMove);
@@ -3377,9 +4180,169 @@ class MiniMaxH3DirectorEditor {
         this.canvas?.removeEventListener("mousemove", this._onCanvasHover);
         this.canvas?.classList.remove("bd-grab", "bd-grabbing");
         window.removeEventListener("keydown", this._onKeyDown, true);
+        this.root?.remove();
+        this.root = null;
+        if (this.node?._minimaxEditor === this) this.node._minimaxEditor = null;
+        if (this.domWidget?._minimaxEditor === this) this.domWidget._minimaxEditor = null;
     }
 
     widget(name) { return this.node.widgets?.find((w) => w.name === name); }
+
+    applyImportedTimeline(timeline, widgets = {}) {
+        const data = timeline && typeof timeline === "object" ? timeline : {};
+        // Replace, do not merge: drop in-memory drafts from the previous task so
+        // later t2v/r2v/v2v switches restore pack batchWorkspaces, not stale slots.
+        this._batchWsMem = {};
+        this._videoWsMem = {};
+        this._lastOutputWasBatchFixed = false;
+        this._legacyFrames = [];
+        this._clearPreviewVideos?.(true);
+        // Drop live card/token-editor drafts *before* parse/normalize/commit.
+        // Otherwise flushBatchPromptInputs writes the previous empty 提示词
+        // over the imported segment prompts (same ids on re-import).
+        this._suspendPromptFlush = true;
+        try {
+            if (this.batchList) {
+                teardownPromptImageMentions(this.batchList);
+                this.batchList.innerHTML = "";
+            }
+            const taskType = widgets.task_type || widgets.taskType || data.global?.taskType || "";
+            if (this.taskTypeWidget && taskType) this.taskTypeWidget.value = taskType;
+            if (this.globalTask && taskType) this.globalTask.value = taskType;
+            for (const name of ["steps", "sampler", "scheduler", "cfg", "shift_video", "shift_audio", "seed"]) {
+                if (widgets[name] == null || widgets[name] === "") continue;
+                const w = this.widget(name);
+                if (w) w.value = widgets[name];
+            }
+            const out = data.output && typeof data.output === "object" ? data.output : {};
+            if (this.widthWidget && out.width) this.widthWidget.value = out.width;
+            if (this.heightWidget && out.height) this.heightWidget.value = out.height;
+            if (this.frameRateWidget && (data.frameRate || out.frameRate)) {
+                this.frameRateWidget.value = data.frameRate || out.frameRate;
+            }
+            if (this.refMaxWidget && (data.refMaxSize || out.longEdge)) {
+                this.refMaxWidget.value = data.refMaxSize || out.longEdge;
+            }
+            if (this.timelineWidget) this.timelineWidget.value = JSON.stringify(data);
+            const initTotal = Math.max(0, parseInt(this.totalFramesWidget?.value || data.totalFrames || 124, 10));
+            const initFps = coerceTimelineFps(this.frameRateWidget?.value || data.frameRate || 24);
+            this.timeline = parseTimeline(this.timelineWidget?.value, initTotal, initFps);
+            const importedGlobalPrompt = this.timeline.global?.prompt ?? "";
+            if (this.globalPromptWidget) this.globalPromptWidget.value = importedGlobalPrompt;
+            if (this.globalPrompt) {
+                this.globalPrompt.value = importedGlobalPrompt;
+                this.globalPrompt.__bdTokenApi?.hydrateFromValue?.(importedGlobalPrompt);
+            }
+            this.syncFrameRateUI?.(this.timeline.frameRate);
+            this._directorMode = this.getDirectorMode();
+            this._taskKey = resolveTaskKey(this.taskTypeWidget?.value || taskType);
+            if (this._directorMode === "video") {
+                this.restoreVideoFromTimeline();
+            } else if (this._directorMode === "prompt_batch" || this._directorMode === "image_batch") {
+                ensureImageBatchTimeline(this);
+            } else if (this._directorMode === "fl2v") {
+                ensureFl2vTimeline(this);
+            } else {
+                this.ensureGenTimeline();
+            }
+            this.applyTaskLayout(this._directorMode);
+            this.populateTaskSelect(this.globalTask, this.taskTypeWidget?.value);
+            this.setEditMode(this.timeline.editMode || "global");
+            this.selectedIndex = 0;
+            this.updateSelectionUI();
+            if (this.globalPrompt) {
+                this.globalPrompt.value = this.timeline.global?.prompt || "";
+                this.globalPrompt.__bdTokenApi?.hydrateFromValue?.(this.globalPrompt.value);
+            }
+            this.commit(true, { syncTimeline: true });
+            snapshotDirectorSampleWidgets(this.node, { force: true, includeHidden: true });
+            this._externalGroupsSyncSig = null;
+            this.syncExternalGroupsTimeline?.();
+            this.scheduleSettleRender?.();
+            this.updateDomWidgetHeight?.();
+        } finally {
+            this._suspendPromptFlush = false;
+        }
+    }
+
+    _videoIdentityFromParts(video, clips) {
+        const list = Array.isArray(clips) && clips.length ? clips : [];
+        if (list.length) {
+            return list
+                .map((c) => `${c?.type || "input"}:${c?.videoFile || c?.fileName || ""}`)
+                .filter((id) => id && id !== "input:");
+        }
+        const v = video || {};
+        const id = `${v.type || "input"}:${v.videoFile || v.fileName || ""}`;
+        return id && id !== "input:" ? [id] : [];
+    }
+
+    _clipThumbIdentity(clipIndex = 0) {
+        const clips = this.getVideoClips();
+        const c = clips[clipIndex] || clips[0] || this.timeline?.video || {};
+        const id = `${c.type || "input"}:${c.videoFile || c.fileName || ""}`;
+        return id === "input:" ? "" : id;
+    }
+
+    _videoThumbIdentity() {
+        return this._videoIdentityFromParts(this.timeline?.video, this.timeline?.videoClips).join("|");
+    }
+
+    _liveVideoFileIdentities() {
+        return this._videoIdentityFromParts(this.timeline?.video, this.timeline?.videoClips);
+    }
+
+    _knownVideoFileIdentities() {
+        const ids = new Set(this._liveVideoFileIdentities());
+        for (const ws of Object.values(this._videoWsMem || {})) {
+            for (const id of this._videoIdentityFromParts(ws?.video, ws?.videoClips)) ids.add(id);
+        }
+        for (const ws of Object.values(this.timeline?.videoWorkspaces || {})) {
+            for (const id of this._videoIdentityFromParts(ws?.video, ws?.videoClips)) ids.add(id);
+        }
+        return ids;
+    }
+
+    _frameThumbKey(logicalFrame) {
+        const entry = this.getFrameMapEntry(logicalFrame);
+        const id = this._clipThumbIdentity(entry.clip) || this._videoThumbIdentity() || "none";
+        if (this._legacyFrames.length) return `${id}#legacy:${logicalFrame}`;
+        return `${id}#${entry.clip}:${entry.frame}`;
+    }
+
+    _dropThumbsForIdentity(identity) {
+        if (!identity) return;
+        const prefix = `${identity}#`;
+        for (const key of [...this._thumbCache.keys()]) {
+            if (key === identity || String(key).startsWith(prefix)) this._thumbCache.delete(key);
+        }
+        for (const key of [...this._thumbPending]) {
+            if (key === identity || String(key).startsWith(prefix)) this._thumbPending.delete(key);
+        }
+    }
+
+    _dropThumbsIfUnused(identities) {
+        const list = Array.isArray(identities) ? identities : [identities];
+        const used = this._knownVideoFileIdentities();
+        for (const id of list) {
+            if (!id || used.has(id)) continue;
+            this._dropThumbsForIdentity(id);
+        }
+    }
+
+    _flushPendingThumbDrops() {
+        this._dropThumbsIfUnused(this._thumbIdsPendingDrop);
+        this._thumbIdsPendingDrop = [];
+    }
+
+    _invalidateVideoThumbs() {
+        this._thumbCache.clear();
+        this._thumbPending.clear();
+    }
+
+    _usesSourceVideoThumbs() {
+        return this.getDirectorMode() === "video";
+    }
 
     hasVideo() {
         const v = this.timeline?.video || {};
@@ -3904,10 +4867,15 @@ class MiniMaxH3DirectorEditor {
     }
 
     _switchToVideoTaskWorkspace(prevTaskKey, currentKey) {
+        const prevIds = new Set(this._liveVideoFileIdentities());
         if (prevTaskKey && getDirectorMode(prevTaskKey) === "video" && prevTaskKey !== currentKey) {
             this._stashVideoWorkspace(prevTaskKey);
             this._clearLiveRunSelection();
         }
+        const nextWs = this._videoWsMem?.[currentKey] || this.timeline.videoWorkspaces?.[currentKey];
+        const nextIds = new Set(this._videoIdentityFromParts(nextWs?.video, nextWs?.videoClips));
+        const sameFiles = prevIds.size === nextIds.size && [...prevIds].every((id) => nextIds.has(id));
+        if (!sameFiles) this._clearPreviewVideos?.(true);
         if (this._restoreVideoWorkspace(currentKey)) return;
         this._resetVideoWorkspaceLive();
     }
@@ -3959,7 +4927,11 @@ class MiniMaxH3DirectorEditor {
 
     _resetBatchWorkspaceLive(taskKey) {
         const key = resolveTaskKey(taskKey || this.getTaskKey());
-        this.timeline.segments = [newBatchSegment({ durationSec: defaultDurationSec(key) })];
+        this.timeline.segments = [newBatchSegment({
+            frameRate: this.getFrameRate(),
+            durationSec: defaultDurationSec(key === "mixed" ? "t2v" : key),
+            ...(key === "mixed" ? { taskType: "t2v" } : {}),
+        })];
         this.timeline.editMode = "segment";
         this.selectedIndex = 0;
         this._clearLiveRunSelection();
@@ -4036,7 +5008,7 @@ class MiniMaxH3DirectorEditor {
     ensureGenTimeline() {
         const key = this.getTaskKey();
         this.timeline.gen = this.timeline.gen || {};
-        const defFc = defaultFrameCount(key);
+        const defFc = defaultFrameCount(key, this.getFrameRate());
         if (!this.timeline.segments?.length || !sumFrameCounts(this.timeline.segments)) {
             this.timeline.segments = [{
                 id: uid(), start: 0, length: defFc, frameCount: defFc,
@@ -4062,7 +5034,7 @@ class MiniMaxH3DirectorEditor {
         let start = 0;
         const fixed = [];
         for (const seg of [...this.timeline.segments]) {
-            let fc = clamp(parseInt(seg.frameCount ?? seg.length, 10) || defaultFrameCount(key), minFc, MAX_GEN_FRAMES);
+            let fc = clamp(parseInt(seg.frameCount ?? seg.length, 10) || defaultFrameCount(key, this.getFrameRate()), minFc, MAX_GEN_FRAMES);
             fixed.push({
                 ...seg,
                 start,
@@ -4074,7 +5046,7 @@ class MiniMaxH3DirectorEditor {
             start += fc;
         }
         if (!fixed.length) {
-            const fc = defaultFrameCount(key);
+            const fc = defaultFrameCount(key, this.getFrameRate());
             fixed.push({
                 id: uid(), start: 0, length: fc, frameCount: fc,
                 prompt: "", taskType: "", refs: [], genImage: { imageFile: "" },
@@ -4305,7 +5277,7 @@ class MiniMaxH3DirectorEditor {
                     this._clearLiveRunSelection();
                 }
                 const key = this.getTaskKey();
-                const defFc = defaultFrameCount(key);
+                const defFc = defaultFrameCount(key, this.getFrameRate());
                 const keepPrompt = this.timeline.global?.prompt || "";
                 this.timeline.segments = [{
                     id: uid(),
@@ -4337,8 +5309,9 @@ class MiniMaxH3DirectorEditor {
         }
         this.timeline.timelineMode = mode;
         this._directorMode = mode;
+        const taskKey = currentKey;
+        this._taskKey = taskKey;
 
-        const taskKey = this.getTaskKey();
         const isR2v = isBatch && taskKey === "r2v";
         const showBatchTrack = isBatch && isVideoBatchTask(taskKey);
         // fl2v / t2v / i2v / r2v use the main timeline track; image batch + gen hide it.
@@ -4347,12 +5320,14 @@ class MiniMaxH3DirectorEditor {
         const showBatchExport = (isBatch && isVideoBatchTask(taskKey)) || isFl2v;
         // t2v / i2v / r2v: never show source-video upload (fl2v keeps "上传图片").
         this.btnVideo?.classList.toggle("hidden", (hideVideoUpload && !isFl2v) || isR2v);
+        this.btnVideoExisting?.classList.toggle("hidden", hideVideoUpload || isFl2v || isR2v);
         this.btnVideoAppend?.classList.toggle("hidden", hideVideoUpload || isFl2v || isR2v);
-        // Playback / seek / zoom are for source-video (v2v) and fl2v preview. Batch video has no source clip.
-        this.controlsBar?.classList.toggle("hidden", !isFl2v && (hideTimeline || isBatch));
-        this.boundsEl?.classList.toggle("hidden", !isFl2v && (hideTimeline || isBatch));
-        this.timecodeEl?.classList.toggle("hidden", !isFl2v && (hideTimeline || isBatch));
+        // Playback / seek / zoom are for source-video (v2v). fl2v / t2v / batch have no source clip.
+        this.controlsBar?.classList.toggle("hidden", hideTimeline || isBatch || isFl2v);
+        this.boundsEl?.classList.toggle("hidden", hideTimeline || isBatch || isFl2v);
+        this.timecodeEl?.classList.toggle("hidden", hideTimeline || isBatch || isFl2v);
         this.viewport?.classList.toggle("hidden", isBatch && !showBatchTrack);
+        this.tlZoomWrap?.classList.toggle("hidden", isBatch && !showBatchTrack);
         this.updateStageVisibility();
         this.updateLiveSamplePanel();
         this.syncExternalGroupsTimeline();
@@ -4460,8 +5435,9 @@ class MiniMaxH3DirectorEditor {
             this.outHint.classList.toggle("hidden", !showHint);
             this.outHint.textContent = showHint ? genLayoutHint(this.getTaskKey()) : "";
         }
-        const isVideoEditTask = taskKey === "v2v" || taskKey === "rv2v";
+        const isVideoEditTask = isVideoEditTaskKey(taskKey) || taskKey === "r2v";
         this.outAudioWrap?.classList.toggle("hidden", !isVideoEditTask);
+        this.syncExportSourceImagesUI();
         if (this.outExportMode) {
             this.outExportMode.disabled = (isBatch || isFl2v) && !showBatchExport;
             this.outExportMode.classList.toggle("hidden", (isBatch || isFl2v) && !showBatchExport);
@@ -4601,6 +5577,41 @@ class MiniMaxH3DirectorEditor {
         input.click();
     }
 
+    async pickExistingReferenceVideo() {
+        if (!taskUsesReferenceVideo(this._activeRefVideoTaskKey())) return;
+        const currentValue = this.getRefVideoTarget()?.referenceVideo?.videoFile || "";
+        const picked = await this.chooseVideoInput({
+            title: t("mediaPicker.pickReferenceVideo"),
+            currentValue,
+        });
+        if (!picked?.relPath) return;
+        const slotEl = this.isGlobalMode() ? this.globalRefVideo : this.segRefVideo;
+        const nameEl = this.isGlobalMode() ? this.globalRefVideoNameEl : this.segRefVideoNameEl;
+        const status = t("upload.inProgress", { name: picked.fileName || picked.relPath });
+        if (slotEl) {
+            slotEl.classList.remove("has-img", "has-video");
+            slotEl.textContent = status;
+        }
+        if (nameEl) nameEl.textContent = status;
+        try {
+            const prep = await this._prepareVideoFrames({
+                fileName: picked.fileName || picked.relPath,
+                relPath: picked.relPath,
+                subfolder: picked.subfolder || "",
+                type: picked.type || "input",
+                statusPrefix: t("parse.refVideo"),
+                syncNativeFps: false,
+            });
+            this.getRefVideoTarget().referenceVideo = this._buildClipRecord(prep);
+            this.renderRefVideoSlot();
+            this.commit(false, { syncTimeline: true });
+        } catch (err) {
+            console.error("[MiniMax H3Director] reference video load failed:", err);
+            if (nameEl) nameEl.textContent = t("upload.refVideoFailed", { err: formatUploadError(err) });
+            this.renderRefVideoSlot();
+        }
+    }
+
     clearReferenceVideo() {
         const target = this.getRefVideoTarget();
         this._stopRefVideoPreviews();
@@ -4684,6 +5695,9 @@ class MiniMaxH3DirectorEditor {
         if (this.timeline.segments.length === 1) {
             this.timeline.segments[0].frameCount = fc;
             this.timeline.segments[0].length = fc;
+            if (isVideoBatchTask(this.getTaskKey())) {
+                this.timeline.segments[0].durationSec = preferredDurationSecFromFrames(fc, this.getFrameRate());
+            }
         }
         this.commit();
     }
@@ -4693,6 +5707,9 @@ class MiniMaxH3DirectorEditor {
         if (!seg) return;
         const minFc = minFrameCount(this.getTaskKey());
         seg.frameCount = clamp(parseInt(this.genSegFc?.value, 10) || minFc, minFc, MAX_GEN_FRAMES);
+        if (isVideoBatchTask(this.getTaskKey())) {
+            seg.durationSec = preferredDurationSecFromFrames(seg.frameCount, this.getFrameRate());
+        }
         if (this.genSegFc) this.genSegFc.value = seg.frameCount;
         this.commit();
     }
@@ -4781,19 +5798,19 @@ class MiniMaxH3DirectorEditor {
                     const resolved = this._previewSegments
                         ? {
                             frames: fc,
-                            durationSec: preferredDurationSecFromFrames(fc, 24),
+                            durationSec: preferredDurationSecFromFrames(fc, this.getFrameRate()),
                         }
                         : durationToClampedMiniMaxFrames(
                             Number.isFinite(raw)
                                 ? raw
-                                : preferredDurationSecFromFrames(fc || defaultFrameCount(key), 24),
-                            24,
+                                : preferredDurationSecFromFrames(fc || defaultFrameCount(key, this.getFrameRate()), this.getFrameRate()),
+                            this.getFrameRate(),
                         );
                     sec += resolved.durationSec;
                     total += resolved.frames;
                 }
                 sec = roundDurationSec(sec);
-                const play = framesToDurationSec(total, 24);
+                const play = framesToDurationSec(total, this.getFrameRate());
                 this.videoNameEl.textContent = total
                     ? t("videoName.batchVideo", {
                         key,
@@ -4975,13 +5992,15 @@ class MiniMaxH3DirectorEditor {
             return best;
         }
 
-        // Video / gen: insert-before semantics (skip the dragged clip).
-        for (const item of ordered) {
-            if (item.visualRank === fromRank) continue;
+        // Video / gen / batch: return the final insertion index after removing
+        // the dragged item. This keeps forward moves from collapsing to no-op.
+        const remaining = ordered.filter((item) => item.visualRank !== fromRank);
+        for (let index = 0; index < remaining.length; index++) {
+            const item = remaining[index];
             const mid = item.seg.start + item.seg.length / 2;
-            if (frame < mid) return item.visualRank;
+            if (frame < mid) return index;
         }
-        return ordered.length - 1;
+        return remaining.length;
     }
 
     reorderSegmentsByRank(fromRank, toRank) {
@@ -4998,8 +6017,7 @@ class MiniMaxH3DirectorEditor {
             if (fromRank < 0 || fromRank >= shots.length) return;
             if (toRank < 0 || toRank >= shots.length) return;
             const [moved] = shots.splice(fromRank, 1);
-            let insertRank = toRank;
-            if (insertRank > fromRank) insertRank -= 1;
+            const insertRank = toRank;
             shots.splice(insertRank, 0, moved);
             this.timeline.shots = shots;
             syncFl2vFromShots(this);
@@ -5017,8 +6035,7 @@ class MiniMaxH3DirectorEditor {
                 refVideos: o.seg.refVideos ? JSON.parse(JSON.stringify(o.seg.refVideos)) : [],
             }));
             const [mMeta] = metas.splice(fromRank, 1);
-            let insertRank = toRank;
-            if (insertRank > fromRank) insertRank -= 1;
+            const insertRank = toRank;
             metas.splice(insertRank, 0, mMeta);
             this.timeline.segments = metas;
             normalizeImageBatchSegments(this);
@@ -5037,8 +6054,7 @@ class MiniMaxH3DirectorEditor {
                 length: o.seg.length || o.seg.frameCount || minFrameCount(this.getTaskKey()),
             }));
             const [mMeta] = metas.splice(fromRank, 1);
-            let insertRank = toRank;
-            if (insertRank > fromRank) insertRank -= 1;
+            const insertRank = toRank;
             metas.splice(insertRank, 0, mMeta);
             for (let i = 0; i < metas.length; i++) {
                 const slot = slots[i] || slots[slots.length - 1];
@@ -5065,8 +6081,7 @@ class MiniMaxH3DirectorEditor {
 
         const [mSlice] = slices.splice(fromRank, 1);
         const [mMeta] = metas.splice(fromRank, 1);
-        let insertRank = toRank;
-        if (insertRank > fromRank) insertRank -= 1;
+        const insertRank = toRank;
         slices.splice(insertRank, 0, mSlice);
         metas.splice(insertRank, 0, mMeta);
 
@@ -5081,8 +6096,6 @@ class MiniMaxH3DirectorEditor {
         this.setFrameMap(newMap);
         this.timeline.segments = newSegs;
         this._syncPrimaryVideoFromClips(newMap);
-        this._thumbCache.clear();
-        this._thumbPending.clear();
         this.selectedIndex = insertRank;
         this._prefetchSegmentThumbs(0, Math.min(newMap.length, THUMB_PREFETCH_BATCH * 4));
     }
@@ -5259,8 +6272,29 @@ class MiniMaxH3DirectorEditor {
         return map;
     }
 
+    _rescaleBatchTimelineForFrameRate(oldFps, newFps) {
+        if (this.isFl2vMode()) {
+            syncFl2vFromShots(this);
+            return;
+        }
+        if (!isVideoBatchTask(this.getTaskKey?.())) return;
+        for (const seg of this.timeline.segments || []) {
+            const frameCount = parseInt(seg.frameCount ?? seg.length, 10) || 0;
+            if (!(Number.isFinite(Number(seg.durationSec)) && Number(seg.durationSec) > 0) && frameCount > 0) {
+                seg.durationSec = preferredDurationSecFromFrames(frameCount, oldFps);
+            }
+        }
+        normalizeImageBatchSegments(this);
+        if (this.totalFramesWidget) {
+            this.totalFramesWidget.value = sumFrameCounts(this.timeline.segments);
+        }
+    }
+
     _resampleTimelineForFrameRate(oldFps, newFps) {
-        if (this.isImageBatch() || this.isGenMode() || !this.hasVideo()) return;
+        if (this.isFl2vMode() || this.isImageBatch() || this.isGenMode() || !this.hasVideo()) {
+            this._rescaleBatchTimelineForFrameRate(oldFps, newFps);
+            return;
+        }
         const oldTotal = this.getTotalFrames();
         const newTotal = this._timelineFrameCountAtFps(newFps, oldFps, oldTotal);
         const hasExplicitMap = this.getFrameMap().length > 0;
@@ -5284,8 +6318,7 @@ class MiniMaxH3DirectorEditor {
             this.seekBar.max = Math.max(0, newTotal - 1);
             this.seekBar.value = this.currentFrame;
         }
-        this._thumbCache.clear();
-        this._thumbPending.clear();
+        this._prefetchSegmentThumbs(0, Math.min(newTotal, THUMB_PREFETCH_BATCH * 4));
     }
 
     onFrameRateChanged(value) {
@@ -5307,6 +6340,29 @@ class MiniMaxH3DirectorEditor {
         const total = this.getTotalFrames();
         const fps = this.getFrameRate();
         return total / Math.max(fps, 0.001);
+    }
+
+    /** User-facing seconds for ruler ticks (batch 秒数, not MiniMax-aligned play length). */
+    getRulerDurationSec() {
+        if (this.isFl2vMode()) return Math.max(0.001, getFl2vTotalDurationSec(this));
+        if (this.usesBatchTimeline()) {
+            const segs = this._previewSegments || this.timeline.segments || [];
+            let sec = 0;
+            const dragging = !!this._previewSegments;
+            for (const seg of segs) {
+                const fc = Math.max(0, parseInt(seg.frameCount ?? seg.length, 10) || 0);
+                const raw = Number(seg.durationSec);
+                if (dragging) {
+                    sec += preferredDurationSecFromFrames(fc, this.getFrameRate());
+                } else if (Number.isFinite(raw) && raw > 0) {
+                    sec += raw;
+                } else if (fc > 0) {
+                    sec += preferredDurationSecFromFrames(fc, this.getFrameRate());
+                }
+            }
+            return Math.max(0.001, roundDurationSec(sec));
+        }
+        return Math.max(0.001, this.getTimelineDurationSec());
     }
 
     isGlobalMode() { return (this.timeline.editMode || "global") === "global"; }
@@ -5458,6 +6514,7 @@ class MiniMaxH3DirectorEditor {
         this.refreshLoopButtonTitle?.();
         this.refreshLiveTaePreviewButton?.();
         this.updateLiveSamplePanel?.();
+        this.syncTimelineZoomUI?.();
         this.syncExternalGroupsTimeline?.();
         updateFl2vDetailUI?.(this);
         updateFl2vToolbarBtns?.(this);
@@ -5537,7 +6594,11 @@ class MiniMaxH3DirectorEditor {
             longEdge: 848, width: 848, height: 480,
             maxExportFrames: 0, exportMode: "all",
             audioMode: "generate",
+            refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
+            continuityMode: DEFAULT_CONTINUITY_MODE,
+            continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
+            continuityKeepTail: true,
         };
         // Prefer ResolutionSelector fields; backfill from width/height when missing.
         // Custom keeps explicit width/height and does not recompute from megapixels.
@@ -5587,10 +6648,47 @@ class MiniMaxH3DirectorEditor {
                 snapContinuityFrames(out.continuityOverlapFrames ?? DEFAULT_CONTINUITY_FRAMES),
             );
         }
+        if (this.segmentContinuityMode) {
+            this.segmentContinuityMode.value = normalizeContinuityMode(out.continuityMode);
+        }
+        if (this.segmentContinuityRedraw) {
+            this.segmentContinuityRedraw.value = String(
+                snapContinuityRedraw(out.continuityRedraw ?? DEFAULT_CONTINUITY_REDRAW),
+            );
+        }
+        if (this.segmentContinuityKeepTail) {
+            this.segmentContinuityKeepTail.checked = isContinuityKeepTail(out);
+        }
         this.syncFrameRateUI(this.timeline.frameRate);
         this.updateOutputModeUI();
         this.updateSegmentContinuityUI();
+        this.syncExportSourceImagesUI();
+        this.syncExportPreFaceRefineUI();
         this.updateOutputPreview();
+    }
+
+    syncExportSourceImagesUI() {
+        const show = isVideoEditTaskKey(this.getTaskKey());
+        this.exportSourceImagesWrap?.classList.toggle("hidden", !show);
+        this.timeline.output = this.timeline.output || {};
+        const w = this.widget("export_source_images");
+        if (this.timeline.output.exportSourceImages == null && w?.value) {
+            this.timeline.output.exportSourceImages = true;
+        }
+        const on = show && !!this.timeline.output.exportSourceImages;
+        if (this.exportSourceImagesCb) this.exportSourceImagesCb.checked = on;
+        if (w) w.value = on;
+    }
+
+    syncExportPreFaceRefineUI() {
+        this.timeline.output = this.timeline.output || {};
+        const w = this.widget("export_pre_face_refine");
+        if (this.timeline.output.exportPreFaceRefine == null && w?.value) {
+            this.timeline.output.exportPreFaceRefine = true;
+        }
+        const on = !!this.timeline.output.exportPreFaceRefine;
+        if (this.exportPreFaceRefineCb) this.exportPreFaceRefineCb.checked = on;
+        if (w) w.value = on;
     }
 
     updateSegmentContinuityUI() {
@@ -5617,7 +6715,42 @@ class MiniMaxH3DirectorEditor {
             // Keep DOM aligned with timeline; eligibility only gates visibility.
             this.segmentContinuityCb.checked = isContinuityEnabled(this.timeline.output);
         }
+        const masterOn = show && isContinuityEnabled(this.timeline?.output);
+        if (this.segmentContinuityModeWrap) {
+            this.segmentContinuityModeWrap.hidden = !masterOn;
+            this.segmentContinuityModeWrap.setAttribute("aria-hidden", masterOn ? "false" : "true");
+            this.segmentContinuityModeWrap.title = masterOn ? t("tooltip.continuityMode") : "";
+        }
+        if (this.segmentContinuityMode && this.timeline?.output) {
+            const mode = normalizeContinuityMode(this.timeline.output.continuityMode);
+            this.segmentContinuityMode.value = mode;
+            this.timeline.output.continuityMode = mode;
+        }
+        const redrawOn = masterOn && normalizeContinuityMode(this.timeline?.output?.continuityMode) === "continue";
+        if (this.segmentContinuityRedrawWrap) {
+            this.segmentContinuityRedrawWrap.hidden = !redrawOn;
+            this.segmentContinuityRedrawWrap.setAttribute("aria-hidden", redrawOn ? "false" : "true");
+            this.segmentContinuityRedrawWrap.title = redrawOn ? t("tooltip.continuityRedraw") : "";
+        }
+        if (this.segmentContinuityRedraw && this.timeline?.output) {
+            const redraw = snapContinuityRedraw(
+                this.timeline.output.continuityRedraw ?? DEFAULT_CONTINUITY_REDRAW,
+            );
+            this.segmentContinuityRedraw.value = String(redraw);
+            this.timeline.output.continuityRedraw = redraw;
+        }
+        if (this.segmentContinuityKeepTailWrap) {
+            this.segmentContinuityKeepTailWrap.hidden = !masterOn;
+            this.segmentContinuityKeepTailWrap.setAttribute("aria-hidden", masterOn ? "false" : "true");
+            this.segmentContinuityKeepTailWrap.title = masterOn ? t("tooltip.continuityKeepTail") : "";
+        }
+        if (this.segmentContinuityKeepTail && this.timeline?.output) {
+            const keepTail = isContinuityKeepTail(this.timeline.output);
+            this.segmentContinuityKeepTail.checked = keepTail;
+            this.timeline.output.continuityKeepTail = keepTail;
+        }
         this.syncSegmentContinuityFromPrevUI();
+        this.syncSegmentRefImageSizeUI();
     }
 
     /** Per-segment「引用上段」on v2v/rv2v segment panel (index>0 + master on). */
@@ -5635,6 +6768,28 @@ class MiniMaxH3DirectorEditor {
         const seg = this.timeline.segments?.[idx];
         cb.checked = isSegmentContinuityFromPrev(seg, idx);
         wrap.title = t("tooltip.segmentContinuityFromPrev");
+    }
+
+    /** Per-segment ref_image_size for rv2v (r2v uses the group card control). */
+    syncSegmentRefImageSizeUI() {
+        const wrap = this.segRefImageSizeWrap;
+        const sel = this.segRefImageSize;
+        if (!wrap || !sel) return;
+        const show = this.getTaskKey() === "rv2v" && !this.isImageBatch() && !this.isFl2vMode();
+        wrap.classList.toggle("hidden", !show);
+        wrap.hidden = !show;
+        if (!show) return;
+        const seg = this.timeline.segments?.[this.selectedIndex ?? 0];
+        const value = resolveSegmentRefImageSize(seg, this.timeline.output);
+        if (![...sel.options].some((o) => o.value === value)) {
+            const extra = document.createElement("option");
+            extra.value = value;
+            extra.textContent = value;
+            sel.appendChild(extra);
+        }
+        sel.value = value;
+        if (seg && seg.refImageSize !== value) seg.refImageSize = value;
+        wrap.title = t("tooltip.refImageSize");
     }
 
     /** Apply ResolutionSelector → fixed width/height on timeline + node widgets. */
@@ -5819,7 +6974,11 @@ class MiniMaxH3DirectorEditor {
             longEdge: 848, width: 848, height: 480,
             maxExportFrames: 0, exportMode: "all",
             audioMode: "generate",
+            refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
+            continuityMode: DEFAULT_CONTINUITY_MODE,
+            continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
+            continuityKeepTail: true,
         };
         if (key === "aspectRatio") {
             if (isCustomAspectRatio(value)) {
@@ -5872,6 +7031,12 @@ class MiniMaxH3DirectorEditor {
             this.timeline.output.continuityEnabled = !!value;
         } else if (key === "continuityOverlapFrames") {
             this.timeline.output.continuityOverlapFrames = snapContinuityFrames(value);
+        } else if (key === "continuityMode") {
+            this.timeline.output.continuityMode = normalizeContinuityMode(value);
+        } else if (key === "continuityRedraw") {
+            this.timeline.output.continuityRedraw = snapContinuityRedraw(value);
+        } else if (key === "continuityKeepTail") {
+            this.timeline.output.continuityKeepTail = !!value;
         }
         this.syncOutputUIFromTimeline();
         if (this.isFl2vMode()) updateFl2vDetailUI(this);
@@ -5948,10 +7113,16 @@ class MiniMaxH3DirectorEditor {
             maxExportFrames: prevOut.maxExportFrames ?? 0,
             exportMode: prevOut.exportMode ?? "all",
             audioMode: normalizeAudioMode(prevOut.audioMode),
+            refImageSize: normalizeRefImageSize(prevOut.refImageSize ?? prevOut.ref_image_size),
             continuityEnabled: isContinuityEnabled(prevOut),
             continuityOverlapFrames: snapContinuityFrames(
                 prevOut.continuityOverlapFrames ?? DEFAULT_CONTINUITY_FRAMES,
             ),
+            continuityMode: normalizeContinuityMode(prevOut.continuityMode),
+            continuityRedraw: snapContinuityRedraw(
+                prevOut.continuityRedraw ?? prevOut.continuity_redraw ?? DEFAULT_CONTINUITY_REDRAW,
+            ),
+            continuityKeepTail: isContinuityKeepTail(prevOut),
         };
         if (this.widthWidget) this.widthWidget.value = resolved.width;
         if (this.heightWidget) this.heightWidget.value = resolved.height;
@@ -5979,10 +7150,29 @@ class MiniMaxH3DirectorEditor {
             mode: "long_edge", longEdge: 864, width: 864, height: 480,
             maxExportFrames: 0, exportMode: "all",
             audioMode: "generate",
+            refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
+            continuityMode: DEFAULT_CONTINUITY_MODE,
+            continuityRedraw: DEFAULT_CONTINUITY_REDRAW,
+            continuityKeepTail: true,
         };
         if (this.timeline.output.audioMode == null) {
             this.timeline.output.audioMode = "generate";
+        }
+        if (isVideoEditTaskKey(this.getTaskKey()) && this.exportSourceImagesCb) {
+            this.timeline.output.exportSourceImages = !!this.exportSourceImagesCb.checked;
+        }
+        const exportSrcW = this.widget("export_source_images");
+        if (exportSrcW) {
+            exportSrcW.value = isVideoEditTaskKey(this.getTaskKey())
+                && !!this.timeline.output.exportSourceImages;
+        }
+        if (this.exportPreFaceRefineCb) {
+            this.timeline.output.exportPreFaceRefine = !!this.exportPreFaceRefineCb.checked;
+        }
+        const exportPreFaceW = this.widget("export_pre_face_refine");
+        if (exportPreFaceW) {
+            exportPreFaceW.value = !!this.timeline.output.exportPreFaceRefine;
         }
         // Sync from DOM when task+segments are eligible — do not rely on CSS
         // "hidden" class (can lag behind equal-split / task changes at queue time).
@@ -6003,6 +7193,31 @@ class MiniMaxH3DirectorEditor {
             this.timeline.output.continuityOverlapFrames = snapContinuityFrames(
                 this.timeline.output.continuityOverlapFrames,
             );
+        }
+        if (continuityEligible && this.segmentContinuityMode) {
+            this.timeline.output.continuityMode = normalizeContinuityMode(
+                this.segmentContinuityMode.value ?? this.timeline.output.continuityMode,
+            );
+        } else {
+            this.timeline.output.continuityMode = normalizeContinuityMode(
+                this.timeline.output.continuityMode,
+            );
+        }
+        if (continuityEligible && this.segmentContinuityRedraw) {
+            this.timeline.output.continuityRedraw = snapContinuityRedraw(
+                this.segmentContinuityRedraw.value
+                    ?? this.timeline.output.continuityRedraw
+                    ?? DEFAULT_CONTINUITY_REDRAW,
+            );
+        } else {
+            this.timeline.output.continuityRedraw = snapContinuityRedraw(
+                this.timeline.output.continuityRedraw,
+            );
+        }
+        if (continuityEligible && this.segmentContinuityKeepTail) {
+            this.timeline.output.continuityKeepTail = !!this.segmentContinuityKeepTail.checked;
+        } else {
+            this.timeline.output.continuityKeepTail = isContinuityKeepTail(this.timeline.output);
         }
         this.syncOutputToWidgets();
     }
@@ -6086,11 +7301,29 @@ class MiniMaxH3DirectorEditor {
         return this.getFrameMapEntry(logicalFrame).frame;
     }
 
+    _previewUrlEquals(videoEl, url) {
+        if (!videoEl || !url) return false;
+        const src = videoEl.currentSrc || videoEl.getAttribute("src") || videoEl.src || "";
+        if (!src) return false;
+        try {
+            return new URL(src, location.href).href === new URL(url, location.href).href;
+        } catch {
+            return src === url;
+        }
+    }
+
+    _assignPreviewSrc(videoEl, url) {
+        if (!videoEl || !url) return;
+        if (this._previewUrlEquals(videoEl, url)) return;
+        videoEl.pause();
+        videoEl.src = url;
+        videoEl.load();
+    }
+
     _getPreviewVideoForClip(clipIndex) {
         const url = this.getClipViewUrl(clipIndex);
         if (!this._previewVideos) this._previewVideos = new Map();
         if (clipIndex === 0 && this._previewVideo && !this._previewVideos.has(0)) {
-            if (url) this._previewVideo.src = url;
             this._previewVideos.set(0, this._previewVideo);
         }
         if (!url) return this._previewVideos.get(clipIndex) || (clipIndex === 0 ? this._previewVideo : null);
@@ -6103,12 +7336,31 @@ class MiniMaxH3DirectorEditor {
             v.preload = "auto";
             v.style.cssText = "position:fixed;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none";
             document.body.appendChild(v);
-            v.src = url;
             this._previewVideos.set(clipIndex, v);
-        } else if (url && v.src !== url && !String(v.src).includes(encodeURIComponent(url.split("/").pop()?.split("?")[0] || ""))) {
-            v.src = url;
         }
+        this._assignPreviewSrc(v, url);
         return v;
+    }
+
+    async _ensurePreviewReady(clipIndex, timeoutMs = 8000) {
+        const v = this._getPreviewVideoForClip(clipIndex);
+        if (!v) return null;
+        if (v.videoWidth && v.readyState >= 2) return v;
+        await new Promise((resolve) => {
+            let done = false;
+            const finish = () => {
+                if (done) return;
+                done = true;
+                v.removeEventListener("loadeddata", finish);
+                v.removeEventListener("canplay", finish);
+                resolve();
+            };
+            v.addEventListener("loadeddata", finish);
+            v.addEventListener("canplay", finish);
+            if (v.videoWidth && v.readyState >= 2) finish();
+            else setTimeout(finish, timeoutMs);
+        });
+        return v.videoWidth ? v : null;
     }
 
     _restorePreviewVideos() {
@@ -6141,21 +7393,26 @@ class MiniMaxH3DirectorEditor {
     async _seekPreviewVideo(timeSec, clipIndex = 0) {
         this._seekChain = this._seekChain.then(() => new Promise((resolve) => {
             const v = this._getPreviewVideoForClip(clipIndex);
-            if (!v?.src) { resolve(); return; }
+            if (!v || !(v.currentSrc || v.getAttribute("src"))) { resolve(); return; }
             const target = Math.max(0, timeSec);
-            const onSeeked = () => {
-                v.removeEventListener("seeked", onSeeked);
+            let settled = false;
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                v.removeEventListener("seeked", finish);
                 resolve();
             };
-            v.addEventListener("seeked", onSeeked);
+            v.addEventListener("seeked", finish);
             try {
                 v.currentTime = target;
             } catch {
-                onSeeked();
+                finish();
                 return;
             }
             if (Math.abs(v.currentTime - target) < 0.02 && v.readyState >= 2) {
-                onSeeked();
+                finish();
+            } else {
+                setTimeout(finish, 1500);
             }
         }));
         return this._seekChain;
@@ -6353,13 +7610,19 @@ class MiniMaxH3DirectorEditor {
 
     _queueThumbPrefetch(logicalFrame) {
         if (this.isPlaying) return;
-        if (this._thumbCache.has(logicalFrame) || this._thumbPending.has(logicalFrame)) return;
+        if (!this._usesSourceVideoThumbs()) return;
+        const cacheKey = this._frameThumbKey(logicalFrame);
+        if (this._thumbCache.has(cacheKey) || this._thumbPending.has(cacheKey)) return;
         if (!this.hasVideo() && !this._legacyFrames.length) return;
-        this._thumbPending.add(logicalFrame);
+        this._thumbPending.add(cacheKey);
         this._fetchThumb(logicalFrame).then((img) => {
-            this._thumbPending.delete(logicalFrame);
-            if (img) this._thumbCache.set(logicalFrame, img);
+            this._thumbPending.delete(cacheKey);
+            if (!img) return;
+            if (this._frameThumbKey(logicalFrame) !== cacheKey) return;
+            this._thumbCache.set(cacheKey, img);
             this.scheduleRender();
+        }).catch(() => {
+            this._thumbPending.delete(cacheKey);
         });
     }
 
@@ -6437,27 +7700,36 @@ class MiniMaxH3DirectorEditor {
             return this._decodeThumb(dataUrl);
         }
         const entry = this.getFrameMapEntry(logicalFrame);
-        const v = this._getPreviewVideoForClip(entry.clip);
-        if (!v?.src || !v.videoWidth) return null;
+        const v = await this._ensurePreviewReady(entry.clip);
+        if (!v?.videoWidth) return null;
         const t = Math.max(0, entry.frame / this.getFrameRate());
         await this._seekPreviewVideo(t, entry.clip);
-        const ratio = v.videoWidth > THUMB_MAX_W ? THUMB_MAX_W / v.videoWidth : 1;
-        const tw = Math.max(1, Math.round(v.videoWidth * ratio));
-        const th = Math.max(1, Math.round(v.videoHeight * ratio));
-        this._thumbCanvas.width = tw;
-        this._thumbCanvas.height = th;
-        this._thumbCtx.drawImage(v, 0, 0, tw, th);
-        return new Promise((resolve) => {
-            const img = new Image();
-            img.onload = () => resolve(img);
-            img.onerror = () => resolve(null);
-            img.src = this._thumbCanvas.toDataURL("image/jpeg", THUMB_JPEG_Q);
-        });
+        if (!v.videoWidth) return null;
+        try {
+            const ratio = v.videoWidth > THUMB_MAX_W ? THUMB_MAX_W / v.videoWidth : 1;
+            const tw = Math.max(1, Math.round(v.videoWidth * ratio));
+            const th = Math.max(1, Math.round(v.videoHeight * ratio));
+            if (!this._thumbCanvas) {
+                this._thumbCanvas = document.createElement("canvas");
+                this._thumbCtx = this._thumbCanvas.getContext("2d", { alpha: false });
+            }
+            this._thumbCanvas.width = tw;
+            this._thumbCanvas.height = th;
+            this._thumbCtx.drawImage(v, 0, 0, tw, th);
+            const dataUrl = this._thumbCanvas.toDataURL("image/jpeg", THUMB_JPEG_Q);
+            return new Promise((resolve) => {
+                const img = new Image();
+                img.onload = () => resolve(img);
+                img.onerror = () => resolve(null);
+                img.src = dataUrl;
+            });
+        } catch {
+            return null;
+        }
     }
 
-    _clearVideoState() {
-        this._thumbCache.clear();
-        this._thumbPending.clear();
+    _clearVideoState({ dropUnusedThumbs = false } = {}) {
+        const oldIds = dropUnusedThumbs ? this._liveVideoFileIdentities() : [];
         this._legacyFrames = [];
         this.timeline.videoClips = [];
         this.timeline.videoWorkspace = null;
@@ -6495,10 +7767,13 @@ class MiniMaxH3DirectorEditor {
         this.stageEmpty?.classList.remove("hidden");
         this.stageBadge?.classList.add("hidden");
         this._stageClipIndex = -1;
+        if (dropUnusedThumbs) this._dropThumbsIfUnused(oldIds);
         this.updateStageVisibility();
     }
 
     _resetTimelineForReplaceUpload() {
+        const ids = this._liveVideoFileIdentities();
+        if (ids.length) this._thumbIdsPendingDrop = ids;
         this._clearVideoState();
         this.timeline.segments = [];
         this.selectedIndex = 0;
@@ -6556,6 +7831,7 @@ class MiniMaxH3DirectorEditor {
     }
 
     _prefetchSegmentThumbs(from, to) {
+        if (!this._usesSourceVideoThumbs()) return;
         for (let f = from; f < to; f++) this._queueThumbPrefetch(f);
     }
 
@@ -6593,6 +7869,41 @@ class MiniMaxH3DirectorEditor {
         input.type = "file"; input.accept = "video/*";
         input.onchange = () => { if (input.files?.[0]) this.loadVideoFile(input.files[0]); };
         input.click();
+    }
+
+    async pickExistingVideoFile() {
+        if (this.isFl2vMode()) return;
+        try {
+            const picked = await this.chooseVideoInput({
+                title: t("mediaPicker.pickVideo"),
+                currentValue: this.timeline.video?.videoFile || "",
+            });
+            if (!picked?.relPath) return;
+            const btn = this.root.querySelector('[data-a="video-existing"]');
+            if (btn) { btn.disabled = true; btn.textContent = t("common.analyzing"); }
+            this.videoNameEl.textContent = t("upload.inProgress", { name: picked.fileName || picked.relPath });
+            try {
+                await this._applyLoadedVideo({
+                    fileName: picked.fileName || picked.relPath,
+                    relPath: picked.relPath,
+                    subfolder: picked.subfolder || "",
+                    type: picked.type || "input",
+                    statusPrefix: t("parse.prefix"),
+                });
+            } catch (err) {
+                console.error("[MiniMax H3Director] video load failed:", err);
+                this.videoNameEl.textContent = t("upload.loadFailed", { err: formatUploadError(err) });
+                this.updateVideoNameLabel();
+                this._flushPendingThumbDrops();
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = t("mediaPicker.pickExistingVideo");
+                }
+            }
+        } catch (err) {
+            console.error("[MiniMax H3Director] video pick failed:", err);
+        }
     }
 
     pickAppendVideoFile() {
@@ -6646,7 +7957,6 @@ class MiniMaxH3DirectorEditor {
         if (btn) { btn.disabled = true; btn.textContent = t("common.uploading"); }
         this.videoNameEl.textContent = t("upload.inProgress", { name: file.name });
         try {
-            this._resetTimelineForReplaceUpload();
             const uploaded = await uploadToInputSmart(file, (frac, cur, total) => {
                 const pct = Math.round(frac * 100);
                 const mode = file.size > COMFY_UPLOAD_SOFT_LIMIT ? t("upload.chunkMode") : t("upload.mode");
@@ -6665,7 +7975,8 @@ class MiniMaxH3DirectorEditor {
         } catch (err) {
             console.error("[MiniMax H3Director] video load failed:", err);
             this.videoNameEl.textContent = t("upload.loadFailed", { err: formatUploadError(err) });
-            this._resetTimelineForReplaceUpload();
+            this.updateVideoNameLabel();
+            this._flushPendingThumbDrops();
         } finally {
             if (btn) {
                 btn.disabled = false;
@@ -6678,6 +7989,10 @@ class MiniMaxH3DirectorEditor {
         if (this._modalKeyHandler) {
             window.removeEventListener("keydown", this._modalKeyHandler, true);
             this._modalKeyHandler = null;
+        }
+        if (this._mediaThumbObserver) {
+            this._mediaThumbObserver.disconnect();
+            this._mediaThumbObserver = null;
         }
         if (this._modalEl) {
             this._modalEl.remove();
@@ -6784,6 +8099,729 @@ class MiniMaxH3DirectorEditor {
             this._modalEl = overlay;
             okBtn.focus();
         });
+    }
+
+    pickLocalFile(accept = "") {
+        return new Promise((resolve) => {
+            const input = document.createElement("input");
+            input.type = "file";
+            if (accept) input.accept = accept;
+            input.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none";
+            const cleanup = () => input.remove();
+            input.onchange = () => {
+                const file = input.files?.[0] || null;
+                cleanup();
+                resolve(file);
+            };
+            input.addEventListener("cancel", () => {
+                cleanup();
+                resolve(null);
+            }, { once: true });
+            document.body.appendChild(input);
+            input.click();
+        });
+    }
+
+    async listInputMedia(kind) {
+        const resp = await api.fetchApi(`/minimax/director/list_input_media?kind=${encodeURIComponent(kind)}`);
+        if (!resp.ok) {
+            const text = (await resp.text()).trim();
+            if (resp.status === 404) throw new Error(t("mediaPicker.needRestart"));
+            throw new Error(text || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        return Array.isArray(data?.items) ? data.items : [];
+    }
+
+    probeInputImageDimensions(relPath, type = "input") {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => resolve({
+                width: img.naturalWidth || img.width || 0,
+                height: img.naturalHeight || img.height || 0,
+            });
+            img.onerror = () => resolve({ width: 0, height: 0 });
+            img.src = inputViewUrl(relPath, type || "input");
+        });
+    }
+
+    showInputMediaPicker({ kind, title, accept, currentValue = "" } = {}) {
+        return new Promise((resolve) => {
+            this._closeBdModal();
+
+            const overlay = document.createElement("div");
+            overlay.className = "bd-modal-overlay";
+            const panel = document.createElement("div");
+            panel.className = "bd-modal bd-media-modal";
+            panel.innerHTML = `
+                <div class="bd-media-head">
+                    <div class="bd-modal-title"></div>
+                    <div class="bd-modal-actions bd-media-head-actions"></div>
+                </div>
+                <div class="bd-media-status"></div>
+                <div class="bd-media-body">
+                    <div class="bd-media-left">
+                        <div class="bd-media-table" tabindex="0">
+                            <div class="bd-media-thead">
+                                <button type="button" class="bd-media-th" data-sort="name">
+                                    <span></span><i class="bd-media-sort"></i>
+                                </button>
+                                <button type="button" class="bd-media-th" data-sort="dims">
+                                    <span></span><i class="bd-media-sort"></i>
+                                </button>
+                                <button type="button" class="bd-media-th" data-sort="time">
+                                    <span></span><i class="bd-media-sort"></i>
+                                </button>
+                            </div>
+                            <div class="bd-media-tbody"></div>
+                        </div>
+                        <div class="bd-media-gallery" tabindex="0"></div>
+                    </div>
+                    <div class="bd-media-right">
+                        <div class="bd-media-preview">
+                            <div class="bd-media-preview-empty"></div>
+                        </div>
+                        <div class="bd-media-meta"></div>
+                    </div>
+                </div>`;
+
+            panel.querySelector(".bd-modal-title").textContent = title || "";
+            const statusEl = panel.querySelector(".bd-media-status");
+            const actionsTop = panel.querySelector(".bd-media-head-actions");
+            const tableEl = panel.querySelector(".bd-media-table");
+            const tbodyEl = panel.querySelector(".bd-media-tbody");
+            const leftEl = panel.querySelector(".bd-media-left");
+            const galleryEl = panel.querySelector(".bd-media-gallery");
+            const previewEl = panel.querySelector(".bd-media-preview");
+            const previewEmptyEl = panel.querySelector(".bd-media-preview-empty");
+            const metaEl = panel.querySelector(".bd-media-meta");
+            const showDims = kind !== "audio" && kind !== "reference_audio";
+            if (!showDims) {
+                tableEl.classList.add("bd-media-nodims");
+                tableEl.querySelector('.bd-media-th[data-sort="dims"]')?.remove();
+            }
+            const thEls = [...panel.querySelectorAll(".bd-media-th")];
+            thEls.forEach((th) => {
+                const key = th.dataset.sort;
+                const label = key === "dims" ? t("mediaPicker.dims")
+                    : key === "time" ? t("mediaPicker.time")
+                    : t("mediaPicker.file");
+                th.querySelector("span").textContent = label;
+            });
+
+            let selectedValue = currentValue || "";
+            let itemsByPath = new Map();
+            let listedItems = [];
+            let sortKey = "time";
+            let sortDir = "desc";
+            let view = readMediaPickerView();
+            let listBtn;
+            let thumbsBtn;
+
+            const finish = (val) => {
+                this._closeBdModal();
+                resolve(val);
+            };
+
+            const selectedChoice = () => {
+                const item = itemsByPath.get(selectedValue || "");
+                if (!item) return null;
+                return {
+                    source: "existing",
+                    relPath: item.relPath,
+                    fileName: item.fileName || item.name || item.relPath,
+                    subfolder: item.subfolder || "",
+                    type: item.type || "input",
+                    mediaKind: item.mediaKind || kind,
+                };
+            };
+
+            const formatMediaTime = (unixSec) => {
+                const n = Number(unixSec);
+                if (!Number.isFinite(n) || n <= 0) return "—";
+                const d = new Date(n * 1000);
+                if (Number.isNaN(d.getTime())) return "—";
+                const pad = (v) => String(v).padStart(2, "0");
+                return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+            };
+
+            const dimsText = (item) => {
+                const w = Number(item?.width) || 0;
+                const h = Number(item?.height) || 0;
+                return w > 0 && h > 0 ? `${w}x${h}` : "—";
+            };
+
+            const dimScore = (item) => {
+                const w = Number(item?.width) || 0;
+                const h = Number(item?.height) || 0;
+                return w > 0 && h > 0 ? w * 100000 + h : -1;
+            };
+
+            const sortedItems = () => {
+                const copy = listedItems.slice();
+                copy.sort((a, b) => {
+                    if (sortKey === "name") {
+                        const av = (a.fileName || a.name || a.relPath || "").toLowerCase();
+                        const bv = (b.fileName || b.name || b.relPath || "").toLowerCase();
+                        const c = av.localeCompare(bv, undefined, { numeric: true, sensitivity: "base" });
+                        if (c) return sortDir === "asc" ? c : -c;
+                    } else if (sortKey === "dims") {
+                        const as = dimScore(a);
+                        const bs = dimScore(b);
+                        const aMiss = as < 0;
+                        const bMiss = bs < 0;
+                        if (aMiss !== bMiss) return aMiss ? 1 : -1;
+                        if (as !== bs) return sortDir === "asc" ? as - bs : bs - as;
+                    } else {
+                        const av = Number(a.modified) || 0;
+                        const bv = Number(b.modified) || 0;
+                        if (av !== bv) return sortDir === "asc" ? av - bv : bv - av;
+                    }
+                    return (a.relPath || "").localeCompare(b.relPath || "");
+                });
+                return copy;
+            };
+
+            const syncHeaderState = () => {
+                thEls.forEach((th) => {
+                    const active = th.dataset.sort === sortKey;
+                    th.classList.toggle("is-active", active);
+                    th.classList.toggle("is-asc", active && sortDir === "asc");
+                });
+            };
+
+            const renderPreview = (item) => {
+                previewEl.innerHTML = "";
+                metaEl.innerHTML = "";
+                if (!item?.relPath) {
+                    previewEmptyEl.textContent = t("mediaPicker.previewEmpty");
+                    previewEl.appendChild(previewEmptyEl);
+                    return;
+                }
+                const relPath = item.relPath;
+                const type = item.type || "input";
+                const previewKind = kind === "reference_audio" ? item.mediaKind : kind;
+                if (previewKind === "image") {
+                    const img = document.createElement("img");
+                    img.src = inputViewUrl(relPath, type);
+                    img.alt = item.fileName || item.name || relPath;
+                    previewEl.appendChild(img);
+                } else if (previewKind === "audio") {
+                    const audio = document.createElement("audio");
+                    audio.src = inputViewUrl(relPath, type);
+                    audio.controls = true;
+                    audio.preload = "metadata";
+                    previewEl.appendChild(audio);
+                } else {
+                    const video = document.createElement("video");
+                    video.src = inputViewUrl(relPath, type);
+                    video.controls = true;
+                    video.preload = "metadata";
+                    video.muted = true;
+                    video.playsInline = true;
+                    previewEl.appendChild(video);
+                }
+                const fileEl = document.createElement("div");
+                fileEl.textContent = `${t("mediaPicker.file")}: ${item.fileName || item.name || relPath}`;
+                metaEl.appendChild(fileEl);
+                const pathEl = document.createElement("div");
+                pathEl.textContent = `${t("mediaPicker.path")}: ${relPath}`;
+                metaEl.appendChild(pathEl);
+            };
+
+            const thumbKind = (item) => (kind === "reference_audio" ? item.mediaKind : kind);
+            const VIDEO_THUMB_MAX = 3;
+            const videoThumbQueue = [];
+            let videoThumbInflight = 0;
+
+            const paintVideoPoster = (video) => {
+                if (!video.isConnected || video.videoWidth <= 0) return false;
+                try {
+                    const canvas = document.createElement("canvas");
+                    const w = 192;
+                    const h = Math.max(1, Math.round((w * video.videoHeight) / video.videoWidth));
+                    canvas.width = w;
+                    canvas.height = h;
+                    canvas.getContext("2d").drawImage(video, 0, 0, w, h);
+                    const img = document.createElement("img");
+                    img.style.cssText = video.style.cssText;
+                    img.alt = "";
+                    img.src = canvas.toDataURL("image/jpeg", 0.72);
+                    video.replaceWith(img);
+                    return true;
+                } catch {
+                    return false;
+                }
+            };
+
+            const loadOneVideoThumb = (video) => new Promise((resolve) => {
+                let settled = false;
+                const finishThumb = () => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    video.removeAttribute("src");
+                    try { video.load(); } catch { /* ignore */ }
+                    resolve();
+                };
+                const timer = setTimeout(finishThumb, 8000);
+                if (!video.isConnected) {
+                    finishThumb();
+                    return;
+                }
+                const src = video.dataset.src;
+                if (!src) {
+                    finishThumb();
+                    return;
+                }
+                const onSeeked = () => {
+                    paintVideoPoster(video);
+                    finishThumb();
+                };
+                const onMeta = () => {
+                    try {
+                        const dur = Number(video.duration);
+                        const t = Number.isFinite(dur) && dur > 0
+                            ? Math.min(0.25, dur * 0.08)
+                            : 0.05;
+                        if (video.readyState >= 2 && Math.abs((video.currentTime || 0) - t) < 0.01) {
+                            onSeeked();
+                            return;
+                        }
+                        video.currentTime = t;
+                    } catch {
+                        onSeeked();
+                    }
+                };
+                video.addEventListener("seeked", onSeeked, { once: true });
+                video.addEventListener("loadedmetadata", onMeta, { once: true });
+                video.addEventListener("error", finishThumb, { once: true });
+                video.preload = "metadata";
+                video.muted = true;
+                video.src = src;
+            });
+
+            const pumpVideoThumbs = () => {
+                while (videoThumbInflight < VIDEO_THUMB_MAX && videoThumbQueue.length) {
+                    const video = videoThumbQueue.shift();
+                    if (!video?.isConnected || video.dataset.armed !== "1") continue;
+                    videoThumbInflight += 1;
+                    void loadOneVideoThumb(video).finally(() => {
+                        videoThumbInflight -= 1;
+                        pumpVideoThumbs();
+                    });
+                }
+            };
+
+            const armVideoThumb = (video) => {
+                if (video.dataset.armed === "1") return;
+                video.dataset.armed = "1";
+                videoThumbQueue.push(video);
+                pumpVideoThumbs();
+            };
+
+            const ensureThumbObserver = () => {
+                if (this._mediaThumbObserver) this._mediaThumbObserver.disconnect();
+                this._mediaThumbObserver = new IntersectionObserver((entries) => {
+                    for (const entry of entries) {
+                        const el = entry.target;
+                        const src = el.dataset.src;
+                        if (!src) continue;
+                        if (entry.isIntersecting) {
+                            if (el.tagName === "VIDEO") armVideoThumb(el);
+                            else if (el.getAttribute("src") !== src) el.src = src;
+                        } else if (el.tagName === "VIDEO") {
+                            el.dataset.armed = "0";
+                            el.removeAttribute("src");
+                            try { el.load(); } catch { /* ignore */ }
+                        }
+                    }
+                }, { root: galleryEl, rootMargin: "80px", threshold: 0.01 });
+            };
+
+            const galleryColumns = () => {
+                const cards = [...galleryEl.querySelectorAll(".bd-media-card")];
+                if (cards.length < 2) return 1;
+                const top = cards[0].offsetTop;
+                let n = 1;
+                for (let i = 1; i < cards.length; i++) {
+                    if (cards[i].offsetTop !== top) break;
+                    n += 1;
+                }
+                return Math.max(1, n);
+            };
+
+            const highlightSelection = ({ scroll = false } = {}) => {
+                tbodyEl.querySelectorAll(".bd-media-tr").forEach((row) => {
+                    const on = row.dataset.path === selectedValue;
+                    row.classList.toggle("selected", on);
+                    if (on && scroll && view === "list") row.scrollIntoView({ block: "nearest" });
+                });
+                galleryEl.querySelectorAll(".bd-media-card").forEach((card) => {
+                    const on = card.dataset.path === selectedValue;
+                    card.classList.toggle("selected", on);
+                    if (on && scroll && view === "thumbs") card.scrollIntoView({ block: "nearest" });
+                });
+                renderPreview(itemsByPath.get(selectedValue));
+            };
+
+            const selectRow = (relPath, { scroll = false } = {}) => {
+                selectedValue = relPath || "";
+                highlightSelection({ scroll });
+            };
+
+            const renderRows = () => {
+                tbodyEl.innerHTML = "";
+                const rows = sortedItems();
+                if (!rows.length) {
+                    const empty = document.createElement("div");
+                    empty.className = "bd-media-empty-row";
+                    empty.textContent = t("mediaPicker.empty");
+                    tbodyEl.appendChild(empty);
+                    selectedValue = "";
+                    syncHeaderState();
+                    highlightSelection();
+                    return;
+                }
+                if (!selectedValue || !itemsByPath.has(selectedValue)) {
+                    selectedValue = rows[0].relPath || "";
+                }
+                for (const item of rows) {
+                    const row = document.createElement("div");
+                    row.className = "bd-media-tr";
+                    row.dataset.path = item.relPath;
+                    const nameTd = document.createElement("div");
+                    nameTd.className = "bd-media-td bd-media-td-name";
+                    const mediaPrefix = kind === "reference_audio"
+                        ? (item.mediaKind === "video" ? "🎞 " : "♪ ")
+                        : "";
+                    nameTd.textContent = `${mediaPrefix}${item.relPath || item.fileName || item.name || ""}`;
+                    nameTd.title = nameTd.textContent;
+                    const timeTd = document.createElement("div");
+                    timeTd.className = "bd-media-td bd-media-td-time";
+                    timeTd.textContent = formatMediaTime(item.modified);
+                    if (showDims) {
+                        const dimsTd = document.createElement("div");
+                        dimsTd.className = "bd-media-td bd-media-td-dims";
+                        dimsTd.textContent = dimsText(item);
+                        row.append(nameTd, dimsTd, timeTd);
+                    } else {
+                        row.append(nameTd, timeTd);
+                    }
+                    row.addEventListener("click", () => selectRow(item.relPath));
+                    row.addEventListener("dblclick", () => {
+                        const choice = selectedChoice();
+                        if (choice) finish(choice);
+                    });
+                    tbodyEl.appendChild(row);
+                }
+                syncHeaderState();
+                highlightSelection({ scroll: true });
+            };
+
+            const renderGallery = () => {
+                if (this._mediaThumbObserver) this._mediaThumbObserver.disconnect();
+                galleryEl.innerHTML = "";
+                const rows = sortedItems();
+                if (!rows.length) {
+                    const empty = document.createElement("div");
+                    empty.className = "bd-media-empty-row";
+                    empty.textContent = t("mediaPicker.empty");
+                    galleryEl.appendChild(empty);
+                    selectedValue = "";
+                    highlightSelection();
+                    return;
+                }
+                if (!selectedValue || !itemsByPath.has(selectedValue)) {
+                    selectedValue = rows[0].relPath || "";
+                }
+                ensureThumbObserver();
+                for (const item of rows) {
+                    const card = document.createElement("button");
+                    card.type = "button";
+                    card.className = "bd-media-card";
+                    card.dataset.path = item.relPath;
+                    const previewKind = thumbKind(item);
+                    const src = inputViewUrl(item.relPath, item.type || "input");
+                    const thumbCss = "display:block;width:100%;height:94px;object-fit:cover;background:#090909;border-radius:4px";
+                    if (previewKind === "audio") {
+                        const ph = document.createElement("div");
+                        ph.className = "bd-media-card-audio";
+                        ph.style.cssText = thumbCss;
+                        ph.textContent = "♪";
+                        card.appendChild(ph);
+                    } else if (previewKind === "video") {
+                        card.classList.add("bd-media-card-has-video");
+                        const video = document.createElement("video");
+                        video.style.cssText = thumbCss;
+                        video.muted = true;
+                        video.playsInline = true;
+                        video.preload = "none";
+                        video.dataset.src = src;
+                        card.appendChild(video);
+                        this._mediaThumbObserver.observe(video);
+                    } else {
+                        const img = document.createElement("img");
+                        img.style.cssText = thumbCss;
+                        img.alt = "";
+                        img.dataset.src = src;
+                        card.appendChild(img);
+                        this._mediaThumbObserver.observe(img);
+                    }
+                    const name = document.createElement("span");
+                    name.className = "bd-media-card-name";
+                    name.textContent = item.relPath || item.fileName || item.name || "";
+                    name.title = name.textContent;
+                    card.appendChild(name);
+                    card.addEventListener("click", () => selectRow(item.relPath));
+                    card.addEventListener("dblclick", () => {
+                        const choice = selectedChoice();
+                        if (choice) finish(choice);
+                    });
+                    galleryEl.appendChild(card);
+                }
+                highlightSelection({ scroll: true });
+            };
+
+            const applyViewClass = () => {
+                leftEl.classList.toggle("is-thumbs", view === "thumbs");
+                listBtn?.classList.toggle("active", view === "list");
+                thumbsBtn?.classList.toggle("active", view === "thumbs");
+            };
+
+            const renderBrowser = () => {
+                applyViewClass();
+                if (view === "thumbs") {
+                    renderGallery();
+                } else {
+                    if (this._mediaThumbObserver) {
+                        this._mediaThumbObserver.disconnect();
+                        this._mediaThumbObserver = null;
+                    }
+                    galleryEl.innerHTML = "";
+                    renderRows();
+                }
+            };
+
+            const moveSelection = (delta) => {
+                const rows = sortedItems();
+                if (!rows.length) return;
+                const idx = rows.findIndex((item) => item.relPath === selectedValue);
+                const next = rows[Math.max(0, Math.min(rows.length - 1, (idx < 0 ? 0 : idx) + delta))];
+                if (next) selectRow(next.relPath, { scroll: true });
+            };
+
+            const loadItems = async () => {
+                statusEl.textContent = t("mediaPicker.loading");
+                tbodyEl.innerHTML = "";
+                galleryEl.innerHTML = "";
+                renderPreview(null);
+                try {
+                    listedItems = await this.listInputMedia(kind);
+                    itemsByPath = new Map(listedItems.map((item) => [item.relPath, item]));
+                    renderBrowser();
+                    statusEl.textContent = listedItems.length
+                        ? t("mediaPicker.count", { n: listedItems.length })
+                        : t("mediaPicker.empty");
+                } catch (err) {
+                    listedItems = [];
+                    itemsByPath = new Map();
+                    tbodyEl.innerHTML = "";
+                    galleryEl.innerHTML = "";
+                    statusEl.textContent = err?.message || String(err);
+                }
+            };
+
+            thEls.forEach((th) => {
+                th.addEventListener("click", () => {
+                    const key = th.dataset.sort || "time";
+                    if (sortKey === key) {
+                        sortDir = sortDir === "asc" ? "desc" : "asc";
+                    } else {
+                        sortKey = key;
+                        sortDir = key === "name" ? "asc" : "desc";
+                    }
+                    renderBrowser();
+                });
+            });
+
+            const viewToggle = document.createElement("div");
+            viewToggle.className = "bd-media-view-toggle";
+            listBtn = document.createElement("button");
+            listBtn.type = "button";
+            listBtn.className = "bd-btn";
+            listBtn.textContent = t("mediaPicker.viewList");
+            thumbsBtn = document.createElement("button");
+            thumbsBtn.type = "button";
+            thumbsBtn.className = "bd-btn";
+            thumbsBtn.textContent = t("mediaPicker.viewThumbs");
+            const setView = (next) => {
+                view = next === "thumbs" ? "thumbs" : "list";
+                writeMediaPickerView(view);
+                renderBrowser();
+                if (view === "thumbs") galleryEl.focus();
+                else tableEl.focus();
+            };
+            listBtn.onclick = () => setView("list");
+            thumbsBtn.onclick = () => setView("thumbs");
+            viewToggle.append(listBtn, thumbsBtn);
+            actionsTop.appendChild(viewToggle);
+
+            const refreshBtn = document.createElement("button");
+            refreshBtn.type = "button";
+            refreshBtn.className = "bd-btn";
+            refreshBtn.textContent = t("mediaPicker.refresh");
+            refreshBtn.onclick = () => { void loadItems(); };
+            actionsTop.appendChild(refreshBtn);
+
+            const uploadBtn = document.createElement("button");
+            uploadBtn.type = "button";
+            uploadBtn.className = "bd-btn";
+            uploadBtn.textContent = t("mediaPicker.upload");
+            uploadBtn.onclick = async () => {
+                const file = await this.pickLocalFile(accept || "");
+                if (file) finish({ source: "file", file });
+            };
+            actionsTop.appendChild(uploadBtn);
+
+            const actionsBottom = document.createElement("div");
+            actionsBottom.className = "bd-modal-actions";
+            const cancelBtn = document.createElement("button");
+            cancelBtn.type = "button";
+            cancelBtn.className = "bd-btn";
+            cancelBtn.textContent = t("dialog.cancel");
+            cancelBtn.onclick = () => finish(null);
+            actionsBottom.appendChild(cancelBtn);
+
+            const okBtn = document.createElement("button");
+            okBtn.type = "button";
+            okBtn.className = "bd-btn bd-btn-primary";
+            okBtn.textContent = t("mediaPicker.useSelected");
+            okBtn.onclick = () => {
+                const choice = selectedChoice();
+                if (choice) finish(choice);
+            };
+            actionsBottom.appendChild(okBtn);
+            panel.appendChild(actionsBottom);
+
+            overlay.onclick = (e) => {
+                if (e.target === overlay) finish(null);
+            };
+            panel.onclick = (e) => e.stopPropagation();
+
+            this._modalKeyHandler = (e) => {
+                if (e.key === "Escape") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    finish(null);
+                    return;
+                }
+                if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                    if (!panel.contains(e.target) && e.target !== document.body) return;
+                    if (view === "list" && (e.key === "ArrowLeft" || e.key === "ArrowRight")) return;
+                    e.preventDefault();
+                    const cols = view === "thumbs" ? galleryColumns() : 1;
+                    const delta = e.key === "ArrowDown" ? cols
+                        : e.key === "ArrowUp" ? -cols
+                        : e.key === "ArrowRight" ? 1
+                        : -1;
+                    moveSelection(delta);
+                    return;
+                }
+                if (e.key !== "Enter") return;
+                if (e.target?.closest?.(".bd-media-th, .bd-media-head-actions, button.bd-btn:not(.bd-btn-primary)")) return;
+                e.preventDefault();
+                okBtn.click();
+            };
+            window.addEventListener("keydown", this._modalKeyHandler, true);
+
+            overlay.appendChild(panel);
+            this.root.appendChild(overlay);
+            this._modalEl = overlay;
+            applyViewClass();
+            void loadItems();
+            if (view === "thumbs") galleryEl.focus();
+            else tableEl.focus();
+        });
+    }
+
+    async chooseImageInput(opts = {}) {
+        const choice = await this.showInputMediaPicker({
+            kind: "image",
+            title: opts.title || t("mediaPicker.pickImage"),
+            accept: "image/*,.jpg,.jpeg,.png,.webp,.bmp,.gif,.tif,.tiff",
+            currentValue: opts.currentValue || "",
+        });
+        if (!choice) return null;
+        if (choice.source === "file" && choice.file) {
+            const uploaded = await uploadToInput(choice.file);
+            const relPath = videoRelativePath(uploaded);
+            const dims = await this.probeInputImageDimensions(relPath, uploaded.type || "input");
+            return {
+                imageFile: relPath,
+                fileName: uploaded?.name || choice.file.name || relPath,
+                subfolder: uploaded?.subfolder || "",
+                type: uploaded?.type || "input",
+                width: dims.width || 0,
+                height: dims.height || 0,
+            };
+        }
+        const dims = await this.probeInputImageDimensions(choice.relPath, choice.type || "input");
+        return {
+            imageFile: choice.relPath,
+            fileName: choice.fileName || choice.relPath,
+            subfolder: choice.subfolder || "",
+            type: choice.type || "input",
+            width: dims.width || 0,
+            height: dims.height || 0,
+        };
+    }
+
+    async chooseVideoInput(opts = {}) {
+        const choice = await this.showInputMediaPicker({
+            kind: "video",
+            title: opts.title || t("mediaPicker.pickVideo"),
+            accept: "video/*,.mp4,.mov,.webm,.mkv,.avi,.m4v,.mpg,.mpeg,.mts,.ts",
+            currentValue: opts.currentValue || "",
+        });
+        if (!choice) return null;
+        if (choice.source === "file" && choice.file) {
+            const uploaded = await uploadToInputSmart(choice.file);
+            return {
+                relPath: videoRelativePath(uploaded),
+                fileName: uploaded?.name || choice.file.name || "",
+                subfolder: uploaded?.subfolder || "",
+                type: uploaded?.type || "input",
+            };
+        }
+        return {
+            relPath: choice.relPath,
+            fileName: choice.fileName || choice.relPath,
+            subfolder: choice.subfolder || "",
+            type: choice.type || "input",
+        };
+    }
+
+    async chooseAudioInput(opts = {}) {
+        const choice = await this.showInputMediaPicker({
+            kind: "reference_audio",
+            title: opts.title || t("mediaPicker.pickAudio"),
+            accept: "audio/*,video/*,.wav,.mp3,.flac,.ogg,.m4a,.aac,.wma,.mp4,.mov,.webm,.mkv,.avi,.m4v,.mpg,.mpeg,.mts,.ts",
+            currentValue: opts.currentValue || "",
+        });
+        if (!choice) return null;
+        if (choice.source === "file" && choice.file) {
+            return prepareLocalReferenceAudio(choice.file);
+        }
+        if (choice.mediaKind === "video") {
+            return extractReferenceAudioFromExistingVideo(choice);
+        }
+        return {
+            relPath: choice.relPath,
+            fileName: choice.fileName || choice.relPath,
+            subfolder: choice.subfolder || "",
+            type: choice.type || "input",
+        };
     }
 
     async _prepareVideoFrames({ fileName, relPath, subfolder, type, statusPrefix, syncNativeFps = true }) {
@@ -6906,9 +8944,10 @@ class MiniMaxH3DirectorEditor {
         if (this.totalFramesWidget) this.totalFramesWidget.value = totalFrames;
         this.syncOutputUIFromTimeline();
         this.updateVideoNameLabel();
+        this._flushPendingThumbDrops();
         this._prefetchSegmentThumbs(0, Math.min(totalFrames, THUMB_PREFETCH_BATCH * 4));
         this.updateStageVisibility();
-        this._syncStagePreview(0, { force: true });
+        this._syncStagePreview(this.currentFrame, { force: true });
         this.commit(false, { syncTimeline: true });
     }
 
@@ -6992,19 +9031,50 @@ class MiniMaxH3DirectorEditor {
         this.scheduleSettleRender();
     }
 
+    getTimelineZoom() {
+        return this.zoomEnabled ? Math.max(1, Number(this.zoom) || 1) : 1;
+    }
+
+    syncTimelineZoomUI() {
+        this.zoomToggleBtn?.classList.toggle("active", !!this.zoomEnabled);
+        this.zoomSlider?.classList.toggle("hidden", !this.zoomEnabled);
+        if (this.zoomSlider && this.zoomEnabled) this.zoomSlider.value = String(this.zoom);
+    }
+
+    toggleTimelineZoom() {
+        this.zoomEnabled = !this.zoomEnabled;
+        this.syncTimelineZoomUI();
+        this.applyZoomWidth();
+        this.scheduleRender();
+    }
+
     applyZoomWidth() {
         if (!this.canvas) return;
-        if (this.zoom <= 1) {
+        const z = this.getTimelineZoom();
+        const vp = this.viewport;
+        if (z <= 1) {
             this.canvas.style.width = "100%";
+            vp?.classList.remove("bd-zoomed");
+            if (vp) vp.scrollLeft = 0;
             return;
         }
-        const base = this.viewport?.clientWidth || 960;
-        this.canvas.style.width = `${Math.max(base, base * this.zoom)}px`;
+        const base = vp?.clientWidth || 960;
+        const nextW = Math.max(base, base * z);
+        const prevW = this.canvas.clientWidth || base;
+        const midRatio = prevW > 0 ? ((vp?.scrollLeft || 0) + (vp?.clientWidth || base) / 2) / prevW : 0.5;
+        this.canvas.style.width = `${nextW}px`;
+        vp?.classList.add("bd-zoomed");
+        if (vp) {
+            requestAnimationFrame(() => {
+                vp.scrollLeft = Math.max(0, midRatio * nextW - vp.clientWidth / 2);
+            });
+        }
     }
 
     adjustZoom(delta) {
+        if (!this.zoomEnabled) return;
         this.zoom = clamp(this.zoom + delta, 1, 10);
-        this.zoomSlider.value = this.zoom;
+        this.syncTimelineZoomUI();
         this.applyZoomWidth();
         this.scheduleRender();
     }
@@ -7081,16 +9151,19 @@ class MiniMaxH3DirectorEditor {
         const w = CONT_JOINT_W;
         const h = CONT_JOINT_H;
         const y = CONT_JOINT_Y;
+        // fl2v 首帧/尾帧 badges sit on the seam; give them a wider click target.
+        const padX = this.isFl2vMode() ? 36 : CONT_JOINT_HIT_PAD;
+        const padY = this.isFl2vMode() ? 12 : CONT_JOINT_HIT_PAD;
         return {
             x,
             y,
             w,
             h,
-            hitX0: x - Math.max(w / 2, 16) - CONT_JOINT_HIT_PAD,
-            hitX1: x + Math.max(w / 2, 16) + CONT_JOINT_HIT_PAD,
+            hitX0: x - Math.max(w / 2, 16) - padX,
+            hitX1: x + Math.max(w / 2, 16) + padX,
             // Include the S{n}→S{n+1} chip in the label band.
             hitY0: RULER_H + 1,
-            hitY1: y + h + CONT_JOINT_HIT_PAD,
+            hitY1: y + h + padY,
         };
     }
 
@@ -7299,7 +9372,7 @@ class MiniMaxH3DirectorEditor {
         }
 
         // Continuity pills sit on the seam (top of clip); win over split/edge in that pad.
-        if (this._showsContinuityJoints() && y >= RULER_H && y <= TRACK_Y + CONT_JOINT_H + 12) {
+        if (this._showsContinuityJoints() && y >= RULER_H && y <= TRACK_Y + CONT_JOINT_H + 24) {
             for (const joint of this._continuityJointList(segs)) {
                 const g = this._continuityJointGeometry(joint.frame, width);
                 if (x >= g.hitX0 && x <= g.hitX1 && y >= g.hitY0 && y <= g.hitY1) {
@@ -7591,8 +9664,8 @@ class MiniMaxH3DirectorEditor {
                 const seg = segs[index];
                 if (!seg) continue;
                 const fc = Math.max(1, parseInt(seg.frameCount ?? seg.length, 10) || 1);
-                const sec = preferredDurationSecFromFrames(fc, 24);
-                const play = framesToDurationSec(fc, 24);
+                const sec = preferredDurationSecFromFrames(fc, this.getFrameRate());
+                const play = framesToDurationSec(fc, this.getFrameRate());
                 if (input.value !== String(sec)) input.value = String(sec);
                 input.title = t("batch.durationTooltip", { frames: fc, play });
             }
@@ -7696,13 +9769,13 @@ class MiniMaxH3DirectorEditor {
                     const fc = Math.max(1, parseInt(seg.frameCount ?? seg.length, 10) || 1);
                     seg.frameCount = fc;
                     seg.length = fc;
-                    seg.durationSec = preferredDurationSecFromFrames(fc, 24);
+                    seg.durationSec = preferredDurationSecFromFrames(fc, this.getFrameRate());
                 }
                 normalizeImageBatchSegments(this);
                 this.renderImageBatchGroups();
                 this.updateVideoNameLabel();
             } else {
-                this.timeline.segments = preview;
+                this._applyOuterVideoCrop(preview);
             }
             this.commit();
         } else if (this._drag?.kind === "reorder") {
@@ -7728,6 +9801,56 @@ class MiniMaxH3DirectorEditor {
         }
         this._drag = null;
         this._edgeSnapshot = null;
+    }
+
+    _applyOuterVideoCrop(preview) {
+        const total = this.getTotalFrames();
+        const ordered = [...(preview || [])].sort((a, b) => a.start - b.start);
+        if (!ordered.length || total <= 0) {
+            this.timeline.segments = preview || [];
+            return false;
+        }
+        const cropStart = clamp(Math.round(Number(ordered[0].start) || 0), 0, total);
+        const last = ordered[ordered.length - 1];
+        const cropEnd = clamp(
+            Math.round((Number(last.start) || 0) + (Number(last.length) || 0)),
+            cropStart,
+            total,
+        );
+        if (cropStart <= 0 && cropEnd >= total) {
+            this.timeline.segments = preview;
+            return false;
+        }
+
+        if (!this.getFrameMap().length) this.materializeFrameMap();
+        const croppedMap = this.getFrameMap().slice(cropStart, cropEnd);
+        const selectedId = this.timeline.segments?.[this.selectedIndex]?.id;
+        this.setFrameMap(croppedMap);
+        this.timeline.totalFrames = croppedMap.length;
+        this._syncPrimaryVideoFromClips(croppedMap);
+        this.timeline.videoWorkspace = null;
+        this.timeline.segments = ordered.flatMap((seg) => {
+            const start = Math.max(cropStart, Number(seg.start) || 0);
+            const end = Math.min(cropEnd, (Number(seg.start) || 0) + (Number(seg.length) || 0));
+            if (end - start < MIN_SEG) return [];
+            return [{ ...seg, start: start - cropStart, length: end - start }];
+        });
+        this.selectedIndex = Math.max(
+            0,
+            this.timeline.segments.findIndex((seg) => seg.id === selectedId),
+        );
+        this.currentFrame = clamp(this.currentFrame - cropStart, 0, Math.max(0, croppedMap.length - 1));
+        if (this.seekBar) {
+            this.seekBar.max = Math.max(0, croppedMap.length - 1);
+            this.seekBar.value = this.currentFrame;
+        }
+        if (this.totalFramesWidget) this.totalFramesWidget.value = croppedMap.length;
+        this._thumbCache.clear();
+        this._thumbPending.clear();
+        this._prefetchSegmentThumbs(0, Math.min(croppedMap.length, THUMB_PREFETCH_BATCH * 4));
+        this._syncStagePreview(this.currentFrame, { force: true });
+        this.updateVideoNameLabel();
+        return true;
     }
 
     addSplitAtMouse(e) {
@@ -8093,9 +10216,7 @@ class MiniMaxH3DirectorEditor {
             }
         }
 
-        this._thumbCache.clear();
-        this._thumbPending.clear();
-        // Invalidate stashed workspace — it still contains the deleted range.
+        // Keep thumbs for remaining source frames; drop only if the clip is gone unused.
         this.timeline.videoWorkspace = null;
 
         if (this.totalFramesWidget) this.totalFramesWidget.value = total;
@@ -8111,18 +10232,7 @@ class MiniMaxH3DirectorEditor {
 
         if (!total) {
             this.videoNameEl.textContent = t("toolbar.noVideo");
-            this.timeline.videoClips = [];
-            this.timeline.video = {
-                fileName: "",
-                videoFile: "",
-                subfolder: "",
-                type: "input",
-                frames: [],
-                frameMap: [],
-                width: 0,
-                height: 0,
-            };
-            this._clearVideoState();
+            this._clearVideoState({ dropUnusedThumbs: true });
         } else {
             this.updateVideoNameLabel();
             this._prefetchSegmentThumbs(0, Math.min(total, THUMB_PREFETCH_BATCH * 4));
@@ -8166,7 +10276,7 @@ class MiniMaxH3DirectorEditor {
     }
 
     getFrameImage(frameIndex) {
-        return this._thumbCache.get(frameIndex) || null;
+        return this._thumbCache.get(this._frameThumbKey(frameIndex)) || null;
     }
 
     drawSegmentThumbnails(ctx, seg, startX, pxWidth, y0, h, index = -1) {
@@ -8590,7 +10700,7 @@ class MiniMaxH3DirectorEditor {
             this.canvas.width = bw;
             this.canvas.height = bh;
         }
-        if (this.zoom > 1) {
+        if (this.getTimelineZoom() > 1) {
             this.canvas.style.width = `${Math.round(width)}px`;
         } else if (this.canvas.style.width !== "100%") {
             this.canvas.style.width = "100%";
@@ -8602,41 +10712,44 @@ class MiniMaxH3DirectorEditor {
         this.ctx.clearRect(0, 0, width, height);
 
         const total = this.getTotalFrames();
-        const fps = this.getFrameRate();
         const segs = this._previewSegments || this.timeline.segments;
 
         this.ctx.fillStyle = "#252525";
         this.ctx.fillRect(0, 0, width, RULER_H);
-        this.ctx.fillStyle = "#888";
         this.ctx.font = "10px sans-serif";
+        this.ctx.textAlign = "left";
+        this.ctx.textBaseline = "alphabetic";
         const fl2vSampleN = this.isFl2vMode() ? getFl2vSampleFrames(this) : total;
-        // fl2v: ruler labels follow 总时长 (sampling window); overflow past it is dashed.
-        const durationSec = this.isFl2vMode()
-            ? getFl2vTotalDurationSec(this)
-            : total / Math.max(fps, 0.001);
-        const formatRulerSec = (sec) => {
-            const n = Math.max(0, Number(sec) || 0);
-            return (Math.round(n * 10) / 10).toFixed(1);
-        };
-        const stepSec = Math.max(1, durationSec / 10);
-        // Leave a gap near the end so the duration label does not collide with the last tick.
-        const endGuard = Math.min(0.6, stepSec * 0.45);
-        for (let s = 0; s < durationSec - 1e-6; s += stepSec) {
-            if (durationSec - s < endGuard) continue;
-            const f = this.isFl2vMode()
-                ? Math.min(fl2vSampleN, Math.round((s / Math.max(durationSec, 0.001)) * fl2vSampleN))
-                : Math.min(total - 1, Math.round(s * fps));
-            const x = this.frameToX(f, width);
-            this.ctx.fillRect(x, RULER_H - 6, 1, 6);
-            this.ctx.fillText(formatRulerSec(s), x + 2, 11);
+        // Batch/fl2v: ticks follow user 秒数 so 5.0s clips land on "5".
+        // v2v: ticks follow play length (frames / fps).
+        const durationSec = this.getRulerDurationSec();
+        const spanX = this.isFl2vMode() ? this.frameToX(fl2vSampleN, width) : width;
+        const pxPerSec = spanX / Math.max(durationSec, 0.001);
+        const majorSec = pickRulerMajorStepSec(pxPerSec);
+        const minorSec = pickRulerMinorStepSec(majorSec, pxPerSec);
+        const secToX = (s) => (s / Math.max(durationSec, 0.001)) * spanX;
+        if (minorSec < majorSec) {
+            this.ctx.fillStyle = "#5a5a5a";
+            const nMinor = Math.floor(durationSec / minorSec + 1e-9);
+            for (let i = 0; i <= nMinor; i++) {
+                const s = i * minorSec;
+                if (s % majorSec === 0) continue;
+                this.ctx.fillRect(secToX(s), RULER_H - 4, 1, 4);
+            }
         }
-        if (fl2vSampleN > 0) {
-            const sampleX = this.frameToX(fl2vSampleN, width);
-            this.ctx.fillStyle = "#aaa";
-            this.ctx.fillRect(sampleX, RULER_H - 8, 1, 8);
-            const endLabel = formatRulerSec(durationSec);
-            const textW = this.ctx.measureText(endLabel).width;
-            this.ctx.fillText(endLabel, Math.max(2, sampleX - textW - 4), 11);
+        this.ctx.fillStyle = "#aaa";
+        const nMajor = Math.floor(durationSec / majorSec + 1e-9);
+        for (let i = 0; i <= nMajor; i++) {
+            const s = i * majorSec;
+            const x = secToX(s);
+            this.ctx.fillRect(x, RULER_H - 7, 1, 7);
+            const label = formatRulerTime(s);
+            const tw = this.ctx.measureText(label).width;
+            if (x + 3 + tw > width - 2 && s > 0) {
+                if (x - tw - 2 >= 2) this.ctx.fillText(label, x - tw - 2, 11);
+            } else {
+                this.ctx.fillText(label, x + 3, 11);
+            }
         }
         // Sample-window end marker on ruler (overflow hatch drawn after segments).
         if (this.isFl2vMode() && total > fl2vSampleN) {
@@ -8672,7 +10785,9 @@ class MiniMaxH3DirectorEditor {
             if (pxW < 8 || seg.length <= 0) continue;
             const a = seg.start + 1;
             const b = seg.start + seg.length;
-            const rangeText = `${a}-${b}`;
+            const rangeText = this.getTaskKey() === "mixed"
+                ? `${resolveSegmentTaskKey(seg, "mixed")} ${a}-${b}`
+                : `${a}-${b}`;
             // v2v / r2v / fl2v: emphasize selected segment label (matches card selection).
             const showSegSel = this.usesBatchTimeline() || this.isFl2vMode()
                 || !(this.isImageBatch() || this.isGenMode());
@@ -9036,17 +11151,21 @@ class MiniMaxH3DirectorEditor {
             );
         }
         if (this.isGenMode() && this.isGlobalMode()) {
-            const defFc = this.timeline.gen?.defaultFrameCount ?? defaultFrameCount(this.getTaskKey());
+            const defFc = this.timeline.gen?.defaultFrameCount ?? defaultFrameCount(this.getTaskKey(), this.getFrameRate());
             if (this.genDefaultFc) this.genDefaultFc.value = defFc;
         }
 
-        if (this.usesGlobalRefPanel()) return;
+        if (this.usesGlobalRefPanel()) {
+            this.syncSegmentRefImageSizeUI();
+            return;
+        }
 
         if (!seg) return;
         const liveSeg = (this._previewSegments || this.timeline.segments)?.[this.selectedIndex] || seg;
         const segKey = resolveTaskKey(liveSeg.taskType || this.timeline.global?.taskType || this.getTaskKey());
         this.segLabel.textContent = t("panel.segmentN", { n: this.selectedIndex + 1 });
         this.syncSegmentContinuityFromPrevUI();
+        this.syncSegmentRefImageSizeUI();
         this._updateSegInfoFromSegment(liveSeg);
         this.segPrompt.value = liveSeg.prompt || "";
         if (taskUsesReferenceImages(segKey)) {
@@ -9059,7 +11178,7 @@ class MiniMaxH3DirectorEditor {
             this.renderGenSrcSlot(this.genSegImg, liveSeg.genImage?.imageFile, t("panel.uploadSegmentSourceImage"));
         }
         if (this.isGenMode() && !this.isGlobalMode()) {
-            const fc = liveSeg.frameCount ?? liveSeg.length ?? defaultFrameCount(this.getTaskKey());
+            const fc = liveSeg.frameCount ?? liveSeg.length ?? defaultFrameCount(this.getTaskKey(), this.getFrameRate());
             if (this.genSegFc) this.genSegFc.value = fc;
         }
         if (this.isFl2vMode()) updateFl2vDetailUI(this);
@@ -9092,6 +11211,10 @@ class MiniMaxH3DirectorEditor {
             highestFilled = Math.max(highestFilled, idx);
         }
         if (countEl) countEl.textContent = polished ? `${filled}/${PIC_SLOTS}` : "";
+        this._syncPickExistingDisabled(
+            isGlobal ? '[data-r="global-refs-pick"]' : '[data-r="seg-refs-pick"]',
+            filled >= PIC_SLOTS,
+        );
 
         if (!this._rv2vPicsVisible) this._rv2vPicsVisible = {};
         const visKey = isGlobal ? "global" : `seg:${target?.id ?? this.selectedIndex}`;
@@ -9325,6 +11448,10 @@ class MiniMaxH3DirectorEditor {
             if (r?.audioFile || r?.fileName) filled += 1;
         }
         if (countEl) countEl.textContent = polished ? `${filled}/${MAX_REFERENCE_AUDIOS}` : "";
+        this._syncPickExistingDisabled(
+            isGlobal ? '[data-r="global-audios-pick"]' : '[data-r="seg-audios-pick"]',
+            filled >= MAX_REFERENCE_AUDIOS,
+        );
 
         box.innerHTML = "";
         for (let i = 0; i < MAX_REFERENCE_AUDIOS; i++) {
@@ -9449,7 +11576,7 @@ class MiniMaxH3DirectorEditor {
     pickRefAudio(target, index) {
         const input = document.createElement("input");
         input.type = "file";
-        input.accept = "audio/*,.wav,.mp3,.flac,.ogg,.m4a,.aac";
+        input.accept = "audio/*,video/*,.wav,.mp3,.flac,.ogg,.m4a,.aac,.wma,.mp4,.mov,.webm,.mkv,.avi,.m4v,.mpg,.mpeg,.mts,.ts";
         input.onchange = () => {
             const file = input.files?.[0];
             if (file) this.addRefAudioFromFile(file, target, index);
@@ -9467,15 +11594,19 @@ class MiniMaxH3DirectorEditor {
             if (index == null) return;
         }
         try {
-            const uploaded = await uploadToInput(file);
-            const relPath = videoRelativePath(uploaded);
+            const prepared = await prepareLocalReferenceAudio(file);
+            const relPath = prepared.relPath;
+            if (hasDuplicateReferenceAudio(target.refAudios, relPath, index)) {
+                alert(t("ref.audioDuplicate"));
+                return;
+            }
             target.refAudios = target.refAudios.filter((r) => Number(r.index ?? r.slot) !== index);
             target.refAudios.push({
                 index,
                 audioFile: relPath,
-                fileName: uploaded?.name || file.name,
-                type: "input",
-                subfolder: uploaded?.subfolder || "",
+                fileName: prepared.fileName || file.name,
+                type: prepared.type || "input",
+                subfolder: prepared.subfolder || "",
             });
             if (this.isR2vCommonEnabled() && target === this.timeline.global) {
                 rebaseR2vGroupSlotsForCommon(this);
@@ -9506,6 +11637,7 @@ class MiniMaxH3DirectorEditor {
         if (this.globalVideosCount) {
             this.globalVideosCount.textContent = `${filled}/${MAX_REFERENCE_VIDEOS}`;
         }
+        this._syncPickExistingDisabled('[data-r="global-videos-pick"]', filled >= MAX_REFERENCE_VIDEOS);
         box.innerHTML = "";
         for (let i = 0; i < MAX_REFERENCE_VIDEOS; i++) {
             const el = document.createElement("div");
@@ -9642,6 +11774,42 @@ class MiniMaxH3DirectorEditor {
         input.click();
     }
 
+    async pickExistingR2vCommonVideo() {
+        const target = (this.timeline.global = this.timeline.global || {
+            refs: [], refAudios: [], refVideos: [],
+        });
+        target.refVideos = target.refVideos || [];
+        const index = Array.from({ length: MAX_REFERENCE_VIDEOS }, (_, i) => i)
+            .find((i) => !target.refVideos.some((r) => Number(r.index ?? r.slot) === i && (r.videoFile || r.fileName)));
+        if (index == null) {
+            alert(t("mediaPicker.slotsFull"));
+            return;
+        }
+        try {
+            const picked = await this.chooseVideoInput({
+                title: t("mediaPicker.pickReferenceVideo"),
+            });
+            if (!picked?.relPath) return;
+            target.refVideos = target.refVideos.filter((r) => Number(r.index ?? r.slot) !== index);
+            target.refVideos.push({
+                index,
+                videoFile: picked.relPath,
+                fileName: picked.fileName || picked.relPath,
+                type: picked.type || "input",
+                subfolder: picked.subfolder || "",
+            });
+            if (this.isR2vCommonEnabled()) {
+                rebaseR2vGroupSlotsForCommon(this);
+                this.renderImageBatchGroups?.();
+            }
+            this.commit();
+            this.renderR2vCommonVideoSlots();
+        } catch (err) {
+            console.error("[MiniMax H3Director] common ref video pick failed:", err);
+            alert(t("upload.refVideoBatchFailed", { err: err?.message || err }));
+        }
+    }
+
     async addR2vCommonVideoFromFile(file, slotIndex = null) {
         if (!file) return;
         const target = (this.timeline.global = this.timeline.global || {
@@ -9687,6 +11855,105 @@ class MiniMaxH3DirectorEditor {
         input.click();
     }
 
+    _nextEmptyMediaSlot(items, max, hasFn) {
+        for (let i = 0; i < max; i++) {
+            const hit = (items || []).find((r) => Number(r.index ?? r.slot) === i);
+            if (!hasFn(hit)) return i;
+        }
+        return -1;
+    }
+
+    _syncPickExistingDisabled(selector, disabled) {
+        const btn = this.root?.querySelector(selector);
+        if (!btn) return;
+        btn.disabled = !!disabled;
+        btn.title = disabled ? t("mediaPicker.slotsFull") : t("mediaPicker.pickExistingHint");
+    }
+
+    async pickExistingRef(isGlobal) {
+        const target = isGlobal
+            ? (this.timeline.global = this.timeline.global || { refs: [] })
+            : this.timeline.segments[this.selectedIndex];
+        if (!target) return;
+        target.refs = target.refs || [];
+        const index = this._nextEmptyMediaSlot(
+            target.refs,
+            MAX_REFERENCE_IMAGES,
+            (r) => !!(r?.imageFile || r?.imageB64),
+        );
+        if (index < 0) {
+            alert(t("mediaPicker.slotsFull"));
+            return;
+        }
+        try {
+            const picked = await this.chooseImageInput({
+                title: t("mediaPicker.pickReferenceImage"),
+            });
+            if (!picked?.imageFile) return;
+            target.refs = target.refs.filter((r) => Number(r.index ?? r.slot) !== index);
+            target.refs.push({ index, imageFile: picked.imageFile, imageB64: "" });
+            if (isGlobal) {
+                this.timeline.global = target;
+                if (this.isR2vCommonEnabled()) {
+                    rebaseR2vGroupSlotsForCommon(this);
+                    this.renderImageBatchGroups?.();
+                }
+            }
+            this.commit();
+            this.renderRefSlots(
+                target.refs,
+                isGlobal ? this.globalRefsBox : this.segRefsBox,
+                isGlobal,
+            );
+        } catch (err) {
+            console.error("[MiniMax H3Director] ref pick failed:", err);
+        }
+    }
+
+    async pickExistingRefAudio(isGlobal) {
+        const target = isGlobal
+            ? (this.timeline.global = this.timeline.global || { refs: [], refAudios: [] })
+            : this.timeline.segments[this.selectedIndex];
+        if (!target) return;
+        target.refAudios = target.refAudios || [];
+        const index = this._nextEmptyMediaSlot(
+            target.refAudios,
+            MAX_REFERENCE_AUDIOS,
+            (r) => !!(r?.audioFile || r?.fileName),
+        );
+        if (index < 0) {
+            alert(t("mediaPicker.slotsFull"));
+            return;
+        }
+        try {
+            const picked = await this.chooseAudioInput({
+                title: t("mediaPicker.pickReferenceAudio"),
+            });
+            if (!picked?.relPath) return;
+            if (hasDuplicateReferenceAudio(target.refAudios, picked.relPath, index)) {
+                alert(t("ref.audioDuplicate"));
+                return;
+            }
+            target.refAudios = target.refAudios.filter((r) => Number(r.index ?? r.slot) !== index);
+            target.refAudios.push({
+                index,
+                audioFile: picked.relPath,
+                fileName: picked.fileName || picked.relPath,
+                type: picked.type || "input",
+                subfolder: picked.subfolder || "",
+            });
+            if (this.isR2vCommonEnabled() && isGlobal) {
+                rebaseR2vGroupSlotsForCommon(this);
+                this.renderImageBatchGroups?.();
+            }
+            this.commit();
+            this.renderRefAudioSlots();
+        } catch (err) {
+            console.error("[MiniMax H3Director] ref audio pick failed:", err);
+            alert(t("upload.refAudioFailed", { err: err?.message || err }));
+        }
+    }
+
     async addRefFromFile(file, target, slotIndex = null, isGlobal = null) {
         target.refs = target.refs || [];
         let index = slotIndex;
@@ -9715,10 +11982,9 @@ class MiniMaxH3DirectorEditor {
 
     onGlobalField(field, value) {
         this.timeline.global = this.timeline.global || { refs: [] };
-        if (field === "taskType") {
-            const prevTaskKey = resolveTaskKey(
-                this.timeline.global?.taskType || this.globalTask?.value || this.taskTypeWidget?.value || "",
-            );
+        const taskTypeChanged = field === "taskType";
+        if (taskTypeChanged) {
+            const prevTaskKey = this._taskKey || resolveTaskKey(this.timeline.global?.taskType || "");
             this.timeline.global[field] = value;
             const prevMode = this._directorMode || "video";
             if (this.globalTask && this.globalTask.value !== value) this.globalTask.value = value;
@@ -9733,6 +11999,11 @@ class MiniMaxH3DirectorEditor {
         }
         if (field === "prompt" && this.globalPromptWidget) this.globalPromptWidget.value = value;
         this.scheduleTimelineSync();
+        if (taskTypeChanged) {
+            // Task selector is a custom DOM control; assigning the hidden
+            // task_type widget does not fire LiteGraph onWidgetChanged.
+            this.node?._mmxRefreshFirstPassCache?.(0);
+        }
         if (field === "prompt") this._schedulePromptRender();
         else this.scheduleRender();
     }
@@ -9776,7 +12047,7 @@ class MiniMaxH3DirectorEditor {
     }
 
     isLiveTaePreviewEnabled() {
-        return this.timeline?.liveTaePreview !== false;
+        return this.timeline?.liveTaePreview === true;
     }
 
     /** fl2v / v2v / rv2v (and aliases): show dedicated live-sample panel when toggle is on. */
@@ -9916,8 +12187,9 @@ class MiniMaxH3DirectorEditor {
 
         const frames = Array.isArray(detail.frames) && detail.frames.length ? detail.frames : [b64];
         this._liveSampleFrames = frames;
-        const frameSrc = (value) => value.startsWith("data:") ? value : `data:image/jpeg;base64,${value}`;
-        const src = frameSrc(frames[0]);
+        const mime = (typeof detail.mime === "string" && detail.mime) ? detail.mime : "image/jpeg";
+        const frameSrc = (value) => value.startsWith("data:") ? value : `data:${mime};base64,${value}`;
+        const src = b64.startsWith("data:") ? b64 : `data:${mime};base64,${b64}`;
         if (this.liveSampleImg) {
             this.liveSampleImg.src = src;
             this.liveSampleImg.classList.remove("hidden");
@@ -10128,7 +12400,7 @@ class MiniMaxH3DirectorEditor {
                     this.seekBar.value = this.currentFrame;
                 }
                 this._observeViewportResize();
-                const drawW = this.viewport?.clientWidth || w;
+                const drawW = this._measureDrawWidth() || this.viewport?.clientWidth || w;
                 if (drawW) this._drawTimelineCanvas(drawW);
                 this._syncStagePreview(this.currentFrame, { force: true });
                 this._pauseSettling = false;
@@ -10614,6 +12886,53 @@ function patchUpstreamAudioWidgetSync(graph, node, inputName) {
     patchUpstreamWidgetSync(graph, node, inputName, ["audio", "audio_path", "video", "video_path", "file", "filename"]);
 }
 
+/** Widget names that carry a prompt string on upstream text nodes. */
+const PROMPT_SOURCE_WIDGETS = [
+    "prompt", "text", "value", "string", "text_str", "positive_prompt", "content",
+];
+
+/** First non-empty string widget on `node`, by the names above. */
+function readPromptWidgetValue(node) {
+    for (const name of PROMPT_SOURCE_WIDGETS) {
+        const value = nodeWidgetValue(node, name);
+        if (typeof value === "string" && value) return value;
+    }
+    return null;
+}
+
+/**
+ * Text the run will actually receive on this input: follow the link upstream and
+ * read the source node's own string widget, walking through STRING passthroughs
+ * (string concat / reroute-style helpers).
+ */
+function readLinkedPromptText(graph, node, inputName = "prompt", depth = 0) {
+    if (!graph || !node || depth > 8) return null;
+    const src = linkedSourceNode(graph, node, inputName);
+    if (!src) return null;
+    const direct = readPromptWidgetValue(src);
+    if (direct != null) return direct;
+    for (const inp of src.inputs || []) {
+        if (inp?.link == null || String(inp.type || "").toUpperCase() !== "STRING") continue;
+        const up = readLinkedPromptText(graph, src, inp.name, depth + 1);
+        if (up != null) return up;
+    }
+    return null;
+}
+
+/**
+ * Effective prompt of a group. When its `prompt` input is wired, the group's own
+ * widget is empty (the link owns the value) — reading only the widget made every
+ * prompt edit report「外接组其他参数」 instead of「外接组提示词」, and left the
+ * Director card showing an empty prompt.
+ */
+function resolveExternalGroupPrompt(graph, node) {
+    const own = String(nodeWidgetValue(node, "prompt") ?? "");
+    const inp = (node?.inputs || []).find((i) => i?.name === "prompt");
+    if (inp?.link == null) return own;
+    const linked = readLinkedPromptText(graph, node, "prompt");
+    return linked != null ? linked : own;
+}
+
 /** Collect Autogrow / legacy slots matching `(?:^|\.)prefix_(\\d+)$`. */
 function collectAutogrowSlotRefs(graph, node, prefix, resolvePath, toRef, patchSync) {
     const found = new Map();
@@ -10634,12 +12953,17 @@ function collectAutogrowSlotRefs(graph, node, prefix, resolvePath, toRef, patchS
 function readExternalGroupSpec(node, graph = null) {
     const g = graph || app.graph || app.canvas?.graph;
     const durRaw = Number(nodeWidgetValue(node, "duration_sec"));
-    const prompt = String(nodeWidgetValue(node, "prompt") ?? "");
+    const sizeRaw = nodeWidgetValue(node, "ref_image_size")
+        ?? nodeWidgetValue(node, "refImageSize");
+    const prompt = resolveExternalGroupPrompt(g, node);
     const cls = node?.comfyClass || node?.type || "";
     const firstImageFile = resolveLinkedImageFile(g, node, "first_frame");
     const lastImageFile = resolveLinkedImageFile(g, node, "last_frame");
     patchUpstreamImageWidgetSync(g, node, "first_frame");
     patchUpstreamImageWidgetSync(g, node, "last_frame");
+    // Editing the prompt on the upstream text node must refresh the Director card
+    // (and the cache verdict) just like editing the group's own widget does.
+    patchUpstreamWidgetSync(g, node, "prompt", PROMPT_SOURCE_WIDGETS);
 
     let refImages = [];
     let refVideos = [];
@@ -10682,6 +13006,9 @@ function readExternalGroupSpec(node, graph = null) {
     return {
         nodeId: node?.id ?? null,
         durationSec: Number.isFinite(durRaw) && durRaw > 0 ? durRaw : null,
+        refImageSize: sizeRaw != null && String(sizeRaw).trim() !== ""
+            ? normalizeRefImageSize(sizeRaw)
+            : "",
         prompt,
         firstImageFile,
         lastImageFile,
@@ -10729,22 +13056,47 @@ function passthroughUpstreamLinkId(node) {
     return linked.length ? linked[0].link : null;
 }
 
-function expandExternalGroupLink(graph, linkId, depth = 0, mode = "specs") {
+/**
+ * A leaf group packer: one node = one group = one segment. Any node emitting
+ * MMX_DIR_GROUP counts, so a third-party packer gets its real duration/prompt
+ * instead of falling back to a placeholder.
+ */
+function isExternalGroupLeafNode(node) {
+    if (!node) return false;
+    const cls = String(node.comfyClass || node.type || "");
+    if (EXTERNAL_GROUP_NODE_TYPES.has(cls)) return true;
+    return (node.outputs || []).some((o) => String(o?.type || "") === "MMX_DIR_GROUP");
+}
+
+/** A fan-in: takes group slots and re-emits a group list (ours or third-party). */
+function isExternalCombineNode(node) {
+    if (!node) return false;
+    const cls = String(node.comfyClass || node.type || "");
+    if (cls === EXTERNAL_COMBINE_NODE_TYPE) return true;
+    const takesGroups = (node.inputs || []).some(
+        (i) => String(i?.type || "") === "MMX_DIR_GROUP" || combineGroupSlotIndex(i?.name) != null,
+    );
+    const emitsGroup = (node.outputs || []).some(
+        (o) => String(o?.type || "") === "MMX_DIR_GROUP",
+    );
+    return takesGroups && emitsGroup;
+}
+
+function expandExternalGroupLink(graph, linkId, depth = 0, mode = "specs", slotLabel = "") {
     if (linkId == null || depth > 16) return [];
     const rec = graphLinkRecord(graph, linkId);
     if (!rec) return [];
     const node = graph.getNodeById?.(rec.originId);
     if (!node) return [];
-    const cls = node.comfyClass || node.type || "";
 
     // Walk through Reroute / rgthree Reroute / other virtual passthroughs.
     if (isExternalGroupPassthroughNode(node)) {
         const upstream = passthroughUpstreamLinkId(node);
         if (upstream == null) return [];
-        return expandExternalGroupLink(graph, upstream, depth + 1, mode);
+        return expandExternalGroupLink(graph, upstream, depth + 1, mode, slotLabel);
     }
 
-    if (cls === EXTERNAL_COMBINE_NODE_TYPE) {
+    if (isExternalCombineNode(node)) {
         const out = [];
         const slots = (node.inputs || [])
             .filter(isCombineGroupSlot)
@@ -10756,12 +13108,19 @@ function expandExternalGroupLink(graph, linkId, depth = 0, mode = "specs") {
             });
         for (const input of slots) {
             if (input.link == null) continue;
-            out.push(...expandExternalGroupLink(graph, input.link, depth + 1, mode));
+            const label = slotLabel || String(input.name || "");
+            out.push(...expandExternalGroupLink(graph, input.link, depth + 1, mode, label));
         }
         return out;
     }
-    if (EXTERNAL_GROUP_NODE_TYPES.has(cls)) {
-        return mode === "nodes" ? [node] : [readExternalGroupSpec(node, graph)];
+    if (isExternalGroupLeafNode(node)) {
+        if (mode === "nodes") return [node];
+        const spec = readExternalGroupSpec(node, graph);
+        // Kept off the UI fields above: the witness and the panel need the node
+        // itself to digest that group's own subtree.
+        spec.slot = slotLabel || "";
+        spec.groupNode = node;
+        return [spec];
     }
     // Unknown upstream packer — still reserve one slot for run-select/timeline.
     if (mode === "nodes") return [null];
@@ -10773,6 +13132,8 @@ function expandExternalGroupLink(graph, linkId, depth = 0, mode = "specs") {
         lastImageFile: null,
         refImages: [],
         refVideos: [],
+        slot: slotLabel || "",
+        groupNode: null,
         refAudios: [],
     }];
 }
@@ -10805,11 +13166,53 @@ function collectExternalGroupNodes(editor) {
     return nodes.length ? nodes : null;
 }
 
+/** First connected group port on a Director node, or null. */
+function firstConnectedGroupPort(node) {
+    for (const name of ["i2v_groups", "r2v_groups"]) {
+        const inp = (node?.inputs || []).find((i) => String(i?.name) === name);
+        if (inp && inp.link != null) return name;
+    }
+    return null;
+}
+
+/**
+ * Ordered leaf groups of a Director node — the same order the backend runs
+ * (Combine slots sorted by index, reroutes transparent). The first-pass cache
+ * witness borrows this so panel and run always agree on segment count and
+ * per-segment duration.
+ */
+function collectExternalGroupChain(node) {
+    const port = firstConnectedGroupPort(node);
+    if (!port) return null;
+    const graph = app.graph ?? app.canvas?.graph;
+    const inp = (node?.inputs || []).find((i) => String(i?.name) === port);
+    if (!graph || inp?.link == null) return null;
+    const specs = expandExternalGroupLink(graph, inp.link, 0, "specs");
+    if (!specs.length) return null;
+    return specs.map((spec, index) => ({
+        slot: spec.slot || `group_${index}`,
+        node: spec.groupNode || null,
+        nodeLabel: spec.groupNode
+            ? `${spec.groupNode.id}:${spec.groupNode.comfyClass || spec.groupNode.type || ""}`
+            : "",
+        durationSec: spec.durationSec,
+        prompt: spec.prompt,
+    }));
+}
+
+// The cache-status witness needs exactly this chain: one record per group, in
+// run order, with each group's own duration and resolved prompt.
+setExternalGroupSpecsProvider(collectExternalGroupChain);
+
 function notifyDirectorsSyncExternalGroups() {
     const graph = app.graph ?? app.canvas?.graph;
     for (const node of graph?._nodes ?? graph?.nodes ?? []) {
         if (!isMiniMaxH3DirectorNode(node)) continue;
         node._minimaxEditor?.syncExternalGroupsTimeline?.();
+        // The Refine card keeps its own verdict (匹配 / 不匹配); writing the
+        // timeline widget does not fire Director.onWidgetChanged, so ask it to
+        // re-check now that the card has been rebuilt from the edited group.
+        node._mmxRefreshFirstPassCache?.(250);
     }
 }
 
@@ -11198,6 +13601,7 @@ app.registerExtension({
                         live: !!detail?.live,
                         step: detail?.step,
                         total_steps: detail?.total_steps,
+                        mime: detail?.mime,
                     },
                 );
                 return;
@@ -11216,6 +13620,7 @@ app.registerExtension({
                 for (const seg of editor.timeline.segments || []) {
                     seg.previewB64 = "";
                     seg.previewFrames = [];
+                    seg.previewMime = "";
                     seg.previewLive = false;
                     seg.previewStep = null;
                     seg.previewTotalSteps = null;
@@ -11253,8 +13658,9 @@ app.registerExtension({
     async loadedGraphNode(node) {
         if (!isMiniMaxH3DirectorNode(node)) return;
         normalizeDirectorOutputs(node);
+        pruneDirectorDomWidgets(node);
         if (!node._minimaxDomWidget) return;
-        finalizeDirectorWidgetOrder(node);
+        applyDirectorConfigureRestore(node, node._mmxSavedConfigureData);
         ensureDirectorDomWidgetWidth(node);
         bindDirectorDomWidgetSizing(node, node._minimaxDomWidget, () => node._minimaxEditor);
         const editor = initDirectorEditor(node);
@@ -11285,12 +13691,34 @@ app.registerExtension({
             };
             return;
         }
-        if (EXTERNAL_GROUP_NODE_TYPES.has(cls) || cls === EXTERNAL_COMBINE_NODE_TYPE) {
+        // Any node that can emit a Director group list (our packers, the Combine,
+        // and third-party packers declaring the same socket type).
+        const emitsGroups = Array.isArray(nodeData?.output)
+            && nodeData.output.some((type) => String(type || "").split(",").includes("MMX_DIR_GROUP"));
+        if (EXTERNAL_GROUP_NODE_TYPES.has(cls) || cls === EXTERNAL_COMBINE_NODE_TYPE || emitsGroups) {
             const onConnectionsChange = nodeType.prototype.onConnectionsChange;
             nodeType.prototype.onConnectionsChange = function (...args) {
                 const out = onConnectionsChange?.apply(this, args);
                 // Combine/Group wiring changes do not fire Director.onConnectionsChange.
                 queueMicrotask(() => notifyDirectorsSyncExternalGroups());
+                return out;
+            };
+            const onWidgetChanged = nodeType.prototype.onWidgetChanged;
+            nodeType.prototype.onWidgetChanged = function (name, value, oldValue, widget) {
+                const out = onWidgetChanged?.apply(this, arguments);
+                // Widget values are committed through the value store, which calls
+                // node.onWidgetChanged(name, value, oldValue, widget) for every
+                // widget type — including V3/comfy_api ones, where widget.callback
+                // is not reliably the function the store invokes. Deferred so the
+                // new value is already readable when the card re-reads the group.
+                // `_mmxSkipExternalSync` marks a Director→Group write-through: that
+                // path already synced, so echoing it back would be a wasted round.
+                if (name === "duration_sec" || name === "prompt"
+                    || name === "ref_image_size" || name === "refImageSize") {
+                    if (!widget?._mmxSkipExternalSync) {
+                        queueMicrotask(() => notifyDirectorsSyncExternalGroups());
+                    }
+                }
                 return out;
             };
             const onCreated = nodeType.prototype.onNodeCreated;
@@ -11299,7 +13727,8 @@ app.registerExtension({
                 // Keep Director timeline in sync when duration/prompt widgets change.
                 queueMicrotask(() => {
                     for (const w of this.widgets || []) {
-                        if (w?.name !== "duration_sec" && w?.name !== "prompt") continue;
+                        if (w?.name !== "duration_sec" && w?.name !== "prompt"
+                            && w?.name !== "ref_image_size" && w?.name !== "refImageSize") continue;
                         if (w._mmxExternalSyncPatched) continue;
                         w._mmxExternalSyncPatched = true;
                         const prev = w.callback;
@@ -11317,6 +13746,8 @@ app.registerExtension({
         }
 
         if (!isDirectorNodeDef(nodeType, nodeData)) return;
+        if (nodeType.prototype._minimaxDirectorPatched) return;
+        nodeType.prototype._minimaxDirectorPatched = true;
 
         const configure = nodeType.prototype.configure;
         nodeType.prototype.configure = function () {
@@ -11345,8 +13776,9 @@ app.registerExtension({
             setTimeout(() => applyDirectorWidgetLabels(this), 0);
             this.size = [1000, 680];
 
-            // Idempotent: avoid a second DOM stack if onNodeCreated is wrapped twice.
-            if (this._minimaxDomWidget?.element) {
+            const existingDom = pruneDirectorDomWidgets(this);
+            // Idempotent: reuse the host if onNodeCreated / graph restore already mounted one.
+            if (existingDom?.element) {
                 setTimeout(() => {
                     finalizeDirectorWidgetOrder(this);
                     initDirectorEditor(this);
@@ -11359,7 +13791,7 @@ app.registerExtension({
             container.style.minHeight = `${getDirectorUiHeight(null)}px`;
             container.style.setProperty("--comfy-widget-min-height", `${getDirectorUiHeight(null)}px`);
             const self = this;
-            const widget = this.addDOMWidget("minimax_director_ui", "director", container, {
+            const widget = this.addDOMWidget(DIRECTOR_DOM_WIDGET_NAME, "director", container, {
                 getValue: () => "",
                 setValue: () => {},
                 getMinHeight: () => getDirectorUiHeight(self._minimaxEditor),
@@ -11410,8 +13842,27 @@ app.registerExtension({
 
         const onConnectionsChange = nodeType.prototype.onConnectionsChange;
         nodeType.prototype.onConnectionsChange = function (...args) {
+            if (!this._mmxPendingConfigureRestore) {
+                snapshotDirectorSampleWidgets(this);
+            }
+            lockDirectorSampleSnap(this, 400);
+            lockDirectorSigmasInput(this);
             const out = onConnectionsChange?.apply(this, args);
             this._minimaxEditor?.syncExternalGroupsTimeline?.();
+            if (this._mmxPendingConfigureRestore) {
+                syncDirectorSchedulerWidgets(this, { restore: false });
+            } else {
+                settleDirectorSampleWidgets(this);
+            }
+            return out;
+        };
+
+        const onWidgetChanged = nodeType.prototype.onWidgetChanged;
+        nodeType.prototype.onWidgetChanged = function (name, ...rest) {
+            const out = onWidgetChanged?.apply(this, [name, ...rest]);
+            if (DIRECTOR_SAMPLE_VALUE_WIDGETS.includes(String(name || ""))) {
+                snapshotDirectorSampleWidgets(this);
+            }
             return out;
         };
 
@@ -11424,19 +13875,25 @@ app.registerExtension({
 
         const onRemoved = nodeType.prototype.onRemoved;
         nodeType.prototype.onRemoved = function () {
-            this._minimaxEditor?.destroy();
+            destroyDirectorEditor(this);
             return onRemoved?.apply(this, arguments);
         };
 
         const onConfigure = nodeType.prototype.onConfigure;
-        nodeType.prototype.onConfigure = function () {
+        nodeType.prototype.onConfigure = function (...args) {
             normalizeDirectorOutputs(this);
-            const config = arguments[0];
-            const englishMigrated = migrateEnglishWidgetValues(this, config);
-            const out = onConfigure?.apply(this, arguments);
-            if (englishMigrated) applyConfiguredWidgetValues(this, config.widgets_values);
+            const saved = args[0];
+            const englishMigrated = migrateEnglishWidgetValues(this, saved);
+            if (saved) this._mmxSavedConfigureData = saved;
+            this._mmxPendingConfigureRestore = true;
+            const out = onConfigure?.apply(this, args);
+            if (englishMigrated) applyConfiguredWidgetValues(this, saved.widgets_values);
+            const runRestore = () => applyDirectorConfigureRestore(this, this._mmxSavedConfigureData);
+            queueMicrotask(runRestore);
+            setTimeout(runRestore, 0);
             setTimeout(() => {
-                finalizeDirectorWidgetOrder(this);
+                finishDirectorConfigureRestore(this);
+                syncDirectorSchedulerWidgets(this, { restore: false });
                 const ed = initDirectorEditor(this) || this._minimaxEditor;
                 if (!ed) return;
                 if (!syncAdvancedModelPanel(ed)) refreshAdvancedModelPanel(ed);

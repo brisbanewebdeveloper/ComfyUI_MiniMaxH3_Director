@@ -17,25 +17,60 @@ Repository: [AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/Comf
 |---------|-------------|
 | **Multi-segment timeline** | Upload video in-node; split, equal-split, smart shot-split (PySceneDetect), append; selectable/deletable split points; visual timeline with thumbs |
 | **Task modes** | `t2v`, `i2v`, `fl2v` (first/last frame), `r2v` (reference material groups), `v2v` (video-to-video), `rv2v` (reference-guided source edit) |
-| **First/last frame (fl2v)** | Dedicated shot groups: add group → start and/or end frame (official FL2VA allows end-only); drag edges for duration; run-select per group |
+| **First/last frame (fl2v)** | Dedicated shot groups: prompt-only (text-to-video), or start and/or end (official FL2VA allows end-only). With segment continuity + From prev, an empty shot pins the previous tail (N context frames) for motion/audio handoff; drag edges for duration; run-select per group |
 | **Reference groups (r2v)** | fl2v-style groups: top **Common params** share refs/audio and a common prompt (concatenated with each group prompt); each group may add images 1–9 / audios 1–3 / videos 1–3; prompt tags `<Picture N>` / `<Video K>` / `<Audio J>` (or `@` picker); timeline preview synced with card selection |
 | **Source-video edit (v2v / rv2v)** | Bernini-style source timeline; each segment bound as `<Video 1>`; `rv2v` adds optional refs (images 1–9, audios 1–3) |
 | **Run select** | Sample only checked segments/groups; unselected may use cache or source passthrough when exporting all |
 | **External multi-group inputs** | `Director Group (Image to Video)` / `(Reference to Video)` + `Groups Combine`; wire into `i2v_groups` / `r2v_groups` for external-priority batches with run-select |
 | **Native stereo audio** | Generated with the picture; `v2v`/`rv2v` can generate / keep source / mute |
 | **Segment continuity** | Off by default. For multi-segment `t2v` / `i2v` / `fl2v` / `r2v` / `v2v` / `rv2v`, pin the previous generated tail (motion + generated audio) into the next sample, then trim the prefix. Context frames: 5 / 22 / 39 / 56 — **recommended default: 22**. **Thanks to [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) for the implementation approach** |
+| **Semantic Bridge** | Wire **MiniMax H3 Director Semantic Bridge** into Director `semantic_bridge` (above SelfLift). Unconnected = identical. Connected = rewrite official cond tokens with the student MLP (RMS-norm → residual mix). Put weights in `models/semantic_bridge/` yourself — this plugin does not ship them. Switch adapters in the node to pick original vs BUNNY; do not chain two bridges. Original leans static relations (layout / space / counting); BUNNY leans action ownership and multi-character scenes. Distilled on FL2VA; `r2v` / `v2v` / `rv2v` is forced-compat — use with care. See [speach1sdef178/MiniMax-H3-Semantic-Bridge](https://huggingface.co/speach1sdef178/MiniMax-H3-Semantic-Bridge) and [JOKER141/BUNNY_H3_Conditioning_Bridge](https://huggingface.co/JOKER141/BUNNY_H3_Conditioning_Bridge) |
+| **SelfLift (progressive first pass)** | Wire **MiniMax H3 Director SelfLift** into Director `selflift` (above Refine). Unconnected = original single-stage first pass. Connected = low-res prefix + 3D lift + high-res tail on the Director canvas. Euler only. **Thanks to [slmonker/selflift-Avatar](https://github.com/slmonker/selflift-Avatar) for the implementation approach** |
 | **Refine / upscale** | Wire **MiniMax H3 Director Refine** into Director `refine`. Unconnected = original single-pass sampling. `refine` = same-resolution second sample; `upscale` = enlarge to a target canvas then SIGMAS sample (pixel / RTX VSR / H3 latent); `latent_upscale` = H3 latent enlarge only, no second sample. `passes` repeats refine (upscale once). Optional `refine_model` swaps the second-pass UNET. `images` is the refined clip; `images_pre_refine` is the first pass (before upscale) |
 | **Run report** | `report` output with plan and per-segment summary |
+| **Director pack I/O** | Toolbar **Import pack / Export pack**: zip of timeline JSON plus reference images/videos/audio. ASCII folders (`shared_params/`, `asset_groups/01/`, `Picture1`…) match the English UI and avoid path-encoding issues |
+
+Reference-audio slots can select an existing video or a local audio/video file. A video's first audio stream is extracted immediately to FLAC directly under `input/`; local source videos remain temporary and are not saved as video assets. Audio follows ComfyUI's existing upload rule: identical content with the same name is reused, while different content with the same name gets a numeric suffix without overwriting; the same resolved audio path is not added twice within one material group.
 
 ### Inputs / outputs
 
 **Inputs:** `model` → `video_vae` → `audio_vae` → `clip`  
-**Optional:** `i2v_groups` (Image to Video packs) / `r2v_groups` (Reference to Video packs) / `refine` (`MiniMax H3 Director Refine`)
+**Optional:** `i2v_groups` (Image to Video packs) / `r2v_groups` (Reference to Video packs) / `semantic_bridge` (`MiniMax H3 Director Semantic Bridge`) / `selflift` (`MiniMax H3 Director SelfLift`) / `refine` (`MiniMax H3 Director Refine`)
 
 **Outputs:** `images` → `audio` → `fps` → `frame_count` → `source_images` → `report` → `images_pre_refine`
 
 > CLIP Loader **type must be `minimax`** (Qwen3-VL).  
 > Use **fl2va** UNET for `t2v` / `i2v` / `fl2v`; **ref2va** for `r2v` / `v2v` / `rv2v`.
+
+`Export source to source_images` populates only the separate `source_images` output; it does not change `images`. Connect `source_images` to a preview or video compositor. Decode failures are reported explicitly and emit a neutral placeholder instead of generated frames.
+
+## Director pack (script + media)
+
+Toolbar **Import pack / Export pack** writes `*.mmxpack.zip`. Paths are ASCII only and match the English UI (independent of the current UI language).
+
+| English UI | Pack path |
+|------|------|
+| Shared params | `shared_params/` |
+| Asset group 1 | `asset_groups/01/` |
+| Picture 1–9 | `Picture1.png` … `Picture9.webp` |
+| Video 1–3 | `Video1.mp4` |
+| Audio 1–3 | `Audio1.wav` |
+| start / end (fl2v) | `start.jpg` / `end.jpg` in that group folder |
+| Upload video (v2v source) | `source_video/` |
+
+```
+pack.json
+shared_params/shared_params.json
+shared_params/Picture1.png
+asset_groups/01/group.json
+asset_groups/01/Picture4.png
+timeline.json
+```
+
+- `timeline.json` is written on Director export for lossless round-trip (including other-task drafts).
+- A converter may write only `pack.json` + `shared_params/` + `asset_groups/` and omit `timeline.json`.
+- Slot numbers match the UI: if Shared params occupy Picture 1–3, group folders continue from `Picture4` — do not rename the group’s first image to `Picture1`.
+- Models (UNET / CLIP / VAE) are not included. Import replaces the current node timeline (with confirmation). Media is copied to ComfyUI `input/minimax_director_packs/`.
 
 ## Requirements
 
@@ -135,9 +170,10 @@ Example: `example_workflows/minimax_h3_director_spectrum_r2v.json`
 ### First/last frame (fl2v) — short guide
 
 1. Set task type to **First/Last Frame to Video (fl2v)**
-2. Click **Add group**, upload start and/or end frame (end-only is allowed)
-3. Adjust duration on the shot card or timeline; write mid-shot motion / camera / transition in the prompt
-4. Queue; with multiple groups, use **Run select** to sample only some of them
+2. Click **Add group**: prompt-only (text-to-video), or upload start and/or end (end-only OK; start-only = i2v)
+3. With multiple groups, turn on **Segment continuity** and check **From prev** — an empty shot pins the previous tail (N context frames, default 22)
+4. Adjust duration on the shot card or timeline; write mid-shot motion / camera / transition in the prompt
+5. Queue; with multiple groups, use **Run select** to sample only some of them
 
 ### Reference groups (r2v) — short guide
 
@@ -161,10 +197,12 @@ Example: `example_workflows/minimax_h3_director_spectrum_r2v.json`
 4. Optional `refine_model` (second-pass UNET); unwired uses the Director model. Typical: Turbo LoRA on pass 1, a clean / other LoRA UNET on refine
 5. Director `images` is the refined clip; `images_pre_refine` is the first pass before upscale (for A/B). `source_images` is still the timeline source, not the first-pass generate
 6. With `sigmas` unconnected, Refine uses built-in `second_pass_steps=2`, `first_sigma=0.8`, and `linear` spacing. A wired `BasicScheduler`, `ManualSigmas`, or custom SIGMAS overrides them
-7. `seed_mode=fixed` gives the second pass an independent seed. `skip_fl2v` skips only FL2V denoising; the shot is still enlarged to the common final canvas
-8. `h3_latent` exposes 3D weights, device, and precision; the external upscaler supplies long-video temporal chunking. Put weights in `ComfyUI/models/latent_upscale_models/`
+7. `seed_mode=fixed` uses `second_seed`; `independent` uses a separately controlled `seed` without changing the first-pass seed. `skip_fl2v` skips only FL2V denoising; the shot is still enlarged to the common final canvas
+8. `h3_latent` exposes 3D weights, device, and precision; `enable_latent_chunking` controls temporal chunking in the external upscaler. Put weights in `ComfyUI/models/latent_upscale_models/`
 9. `strict` defaults on: upscale, second-pass, or final-size failure stops the workflow instead of silently returning the low-resolution first pass
 10. Advanced can enable `CFGNorm`; `0.95` matches `multiple_steps_test`. Segment export with `passes>1` also writes each intermediate pass
+11. With `confirm_first_pass` enabled, the first Queue caches the first pass. Queue again with the same first-pass seed and settings to run only Refine when the cache matches
+12. `enable_tiling` splits the second sample using `tile_count` and `tile_overlap`; use it instead of the older `tiled_refine_enabled` tiling path
 
 Example: `example_workflows/minimax_h3_director_二采_加速.json`
 
@@ -211,7 +249,10 @@ Mirror the two official conditioning nodes and feed **multi-group** batches into
 - [MiniMax-AI](https://github.com/MiniMax-AI) — MiniMax H3 model
 - [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) — weights & docs
 - [NikoDemon80/ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) — inspiration for cross-segment motion/audio continuation
-- [LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler) — external backend for Refine `h3_latent`
+- [LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler) — H3 3D latent upscaler architecture and checkpoint format
+- [slmonker/selflift-Avatar](https://github.com/slmonker/selflift-Avatar) — inspiration for SelfLift progressive first-pass sampling
+- [speach1sdef178/MiniMax-H3-Semantic-Bridge](https://huggingface.co/speach1sdef178/MiniMax-H3-Semantic-Bridge) — Semantic Bridge student formula and adapter format
+- [JOKER141/BUNNY_H3_Conditioning_Bridge](https://huggingface.co/JOKER141/BUNNY_H3_Conditioning_Bridge) — same-architecture action-logic / multi-character adapter
 
 ## License
 

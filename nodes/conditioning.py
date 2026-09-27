@@ -132,6 +132,9 @@ def run_minimax_conditioning(
     if use_reference:
         if audio_vae is None:
             raise ValueError("MiniMax H3 r2v/v2v/rv2v / reference conditioning requires audio_vae.")
+        # Keyword args: official execute() moved vae/audio_vae after
+        # ref_image_size. Positional calls send prompt into height
+        # (`TypeError: ... for //: 'str' and 'int'` in _empty_av_latent).
         out = MiniMaxH3ReferenceToVideo.execute(
             clip=clip,
             prompt=prompt,
@@ -148,12 +151,12 @@ def run_minimax_conditioning(
         )
     else:
         out = MiniMaxH3ImageToVideo.execute(
-            clip,
-            vae,
-            prompt,
-            width,
-            height,
-            length,
+            clip=clip,
+            vae=vae,
+            prompt=prompt,
+            width=width,
+            height=height,
+            length=length,
             first_frame=first_frame,
             last_frame=last_frame,
         )

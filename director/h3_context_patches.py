@@ -313,7 +313,7 @@ def _self_test_layout() -> None:
 
 
 def _classify_layout_owner() -> str | None:
-    """Classify the active MiniMax H3 layout constructor owner."""
+    """Return None, 'ours', 'compatible_solattn', 'foreign_mc', or 'foreign_other'."""
     mm = _mm()
     init = getattr(getattr(mm, "PackedLayout", None), "__init__", None)
     if init is None:
@@ -322,6 +322,19 @@ def _classify_layout_owner() -> str | None:
         return "ours"
     if getattr(init, "_h3_motion_context_layout_patch", False):
         return "foreign_mc"
+    # SolAttn_triton only observes H3 PackedLayout construction. Its exact
+    # wrapper can safely remain underneath Director's continuity wrapper.
+    # Unknown wrappers are still rejected by the checks below.
+    module = str(getattr(init, "__module__", "")).replace("\\", "/")
+    qualname = getattr(init, "__qualname__", "")
+    if (
+        module.endswith("ComfyUI-SolAttn_triton._morton_h3")
+        and qualname == "_patch_packed_layout.<locals>.__init__"
+    ) or (
+        module.endswith("sol_attn_minimax_v5")
+        and qualname == "_patch_packed_layout.<locals>.__init__"
+    ):
+        return "compatible_solattn"
     if getattr(init, "__name__", "") in {"_patched_init", "_director_layout_init"}:
         return "foreign_other"
     if hasattr(init, "__wrapped__"):
@@ -350,6 +363,8 @@ def ensure_layout_patch() -> bool:
             "already patched MiniMax H3 layout. Disable that custom node pack and "
             "restart ComfyUI — both packs cannot own PackedLayout.__init__."
         )
+    if owner == "compatible_solattn":
+        log.info("Director continuity: composing with SolAttn H3 layout observer")
     if owner == "foreign_other":
         raise RuntimeError(
             "Director continuity: another pack already patched MiniMax H3 "

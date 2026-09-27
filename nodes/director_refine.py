@@ -137,7 +137,7 @@ class MiniMaxH3DirectorRefine:
                     list(SEED_MODES),
                     {
                         "default": "inherit",
-                        "tooltip": "inherit = use the Director seed; offset = add 1, 2, and so on for each pass.",
+                        "tooltip": "inherit uses the Director seed; offset adds one per pass; fixed uses second_seed; independent uses seed without changing the first-pass seed.",
                     },
                 ),
                 "aspect_ratio": (
@@ -194,6 +194,30 @@ class MiniMaxH3DirectorRefine:
                             "to protect the keyframes. Disabled by default: rebuild keyframe conditioning after upscaling and run the second pass."
                         ),
                     },
+                ),
+                "confirm_first_pass": (
+                    "BOOLEAN",
+                    {"default": False, "tooltip": "Queue once to cache the first pass, then queue with the same first-pass seed to run Refine."},
+                ),
+                "enable_latent_chunking": (
+                    "BOOLEAN",
+                    {"default": True, "tooltip": "Split H3 latent upscaling into temporal chunks to reduce peak VRAM."},
+                ),
+                "enable_tiling": (
+                    "BOOLEAN",
+                    {"default": False, "tooltip": "Tile the second sample spatially to reduce peak VRAM."},
+                ),
+                "tile_count": (
+                    "INT",
+                    {"default": 2, "min": 1, "max": 8, "step": 1, "tooltip": "Number of spatial tiles for the second sample."},
+                ),
+                "tile_overlap": (
+                    "INT",
+                    {"default": 128, "min": 0, "max": 2048, "step": 64, "tooltip": "Overlap between spatial tiles, in output pixels."},
+                ),
+                "seed": (
+                    "INT",
+                    {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "control_after_generate": True, "tooltip": "Second-pass seed when seed_mode is independent."},
                 ),
                 "scale_by": (
                     "FLOAT",
@@ -407,11 +431,17 @@ class MiniMaxH3DirectorRefine:
         sampler="",
         passes=1,
         seed_mode="inherit",
+        seed=0,
         aspect_ratio=FOLLOW_DIRECTOR_ASPECT,
         megapixels=DEFAULT_UPSCALE_MEGAPIXELS,
         width=1280,
         height=720,
         skip_fl2v=False,
+        confirm_first_pass=False,
+        enable_latent_chunking=True,
+        enable_tiling=False,
+        tile_count=2,
+        tile_overlap=128,
         scale_by=1.5,
         latent_upscale_device="auto",
         latent_upscale_precision="fp16",
@@ -471,6 +501,7 @@ class MiniMaxH3DirectorRefine:
             mode=mode,
             passes=n_passes,
             seed_mode=seed_mode,
+            seed=seed,
             aspect_ratio=aspect_ratio,
             megapixels=mp,
             width=w,
@@ -478,6 +509,11 @@ class MiniMaxH3DirectorRefine:
             target_width=target_width,
             target_height=target_height,
             skip_fl2v=skip_fl2v,
+            confirm_first_pass=confirm_first_pass,
+            enable_latent_chunking=enable_latent_chunking,
+            enable_tiling=enable_tiling,
+            tile_count=tile_count,
+            tile_overlap=tile_overlap,
             scale_by=scale_by,
             latent_upscale_device=latent_upscale_device,
             latent_upscale_precision=latent_upscale_precision,

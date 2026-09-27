@@ -36,7 +36,7 @@ TASK_PROMPT_SPECS: tuple[TaskPromptSpec, ...] = (
         "fl2v",
         "First-Last Frame to Video",
         "",
-        "首帧+尾帧约束（ImageToVideo + first_frame + last_frame）。",
+        "首帧+尾帧约束（可不传图=文生；ImageToVideo 可选 first/last）。",
     ),
     TaskPromptSpec(
         "r2v",
@@ -57,6 +57,13 @@ TASK_PROMPT_SPECS: tuple[TaskPromptSpec, ...] = (
         "",
         "源视频时间轴编辑，可选参考图（图片1–9）与参考音频（音频1–3）；"
         "每段源画面为 <Video 1>，参考图用 <Picture N>，参考音频用 <Audio J>；无参考素材时等同 v2v。",
+    ),
+    TaskPromptSpec(
+        "mixed",
+        "混合模式(Mixed Segments)",
+        "",
+        "同一时间轴上每段自选 t2v / i2v / fl2v / r2v；采样按该段模式走官方 conditioning。"
+        "不接源视频（v2v/rv2v 请用独立任务）。",
     ),
 )
 

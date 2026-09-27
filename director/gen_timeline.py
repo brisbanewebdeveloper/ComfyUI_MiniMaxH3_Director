@@ -253,6 +253,7 @@ def build_gen_director_plan(
         _resolve_export_mode,
         concat_common_segment_prompt,
         merge_indexed_refs,
+        resolve_ref_image_size,
         segment_ref_audios_for_context,
         segment_refs_for_context,
     )
@@ -290,6 +291,9 @@ def build_gen_director_plan(
     )
 
     from .segment_continuity import (
+        resolve_continuity_keep_tail,
+        resolve_continuity_mode,
+        resolve_continuity_redraw,
         resolve_continuity_settings,
         resolve_segment_continuity_from_prev,
     )
@@ -341,7 +345,7 @@ def build_gen_director_plan(
     if is_prompt_batch_timeline(timeline, task_key) and not is_video_batch_task_key(task_key):
         export_mode = "all"
 
-    source_clips = _build_gen_source_clips(
+    source_clips = [] if submode == "gen_blank" else _build_gen_source_clips(
         segment_ranges,
         task_key=task_key,
         submode=submode,
@@ -355,7 +359,9 @@ def build_gen_director_plan(
         ref_max_size=ref_max,
     )
     attach_source_clips = is_prompt_batch_timeline(timeline, task_key) and task_key in ("i2i", "i2v")
-    if attach_source_clips:
+    if submode == "gen_blank":
+        source_video = torch.full((max(1, len(segment_ranges)), 16, 16, 3), 0.5, dtype=torch.float32)
+    elif attach_source_clips:
         # Placeholder timeline index only 鈥?spatial data comes from each segment's source_clip.
         source_video = torch.full((len(source_clips), 16, 16, 3), 0.5, dtype=torch.float32)
     else:
@@ -478,6 +484,7 @@ def build_gen_director_plan(
                 source_clip=seg_source,
                 continuity_from_prev=continuity_flags[idx],
                 loras=list(seg_data.get("loras") or []),
+                ref_image_size=resolve_ref_image_size(seg_data, timeline),
             )
         )
 
@@ -512,4 +519,7 @@ def build_gen_director_plan(
         run_indices=_parse_run_selection(timeline, len(segments)),
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
+        continuity_mode=resolve_continuity_mode(timeline),
+        continuity_redraw=resolve_continuity_redraw(timeline),
+        continuity_keep_tail=resolve_continuity_keep_tail(timeline),
     )

@@ -159,12 +159,18 @@ function orderRefineWidgets(node) {
         "sampler",
         "passes",
         "seed_mode",
+        "seed",
         "aspect_ratio",
         "scale_by",
         "megapixels",
         "width",
         "height",
         "skip_fl2v",
+        "confirm_first_pass",
+        "enable_latent_chunking",
+        "enable_tiling",
+        "tile_count",
+        "tile_overlap",
         "latent_upscale_device",
         "latent_upscale_precision",
         "strict",
@@ -280,6 +286,7 @@ function syncRefineWidgetVisibility(node) {
     setWidgetVisible(node, "latent_upscale_model", showH3Model);
     setWidgetVisible(node, "latent_upscale_device", showH3Model);
     setWidgetVisible(node, "latent_upscale_precision", showH3Model);
+    setWidgetVisible(node, "enable_latent_chunking", showH3Model);
     setWidgetVisible(node, "h3_latent_model", false);
     setWidgetVisible(node, "upscale_model", false);
     setWidgetVisible(node, "schedule", false);
@@ -290,6 +297,12 @@ function syncRefineWidgetVisibility(node) {
     setWidgetVisible(node, "sampler", !latentOnly);
     setWidgetVisible(node, "passes", !latentOnly);
     setWidgetVisible(node, "seed_mode", !latentOnly);
+    setWidgetVisible(node, "seed", !latentOnly && String(widgetValue(widgetByName(node, "seed_mode")) ?? "") === "independent");
+    setWidgetVisible(node, "confirm_first_pass", !latentOnly);
+    setWidgetVisible(node, "enable_tiling", !latentOnly);
+    const tilingOn = !latentOnly && Boolean(widgetValue(widgetByName(node, "enable_tiling")));
+    setWidgetVisible(node, "tile_count", tilingOn);
+    setWidgetVisible(node, "tile_overlap", tilingOn);
     setWidgetVisible(node, "second_pass_steps", !latentOnly);
     setWidgetVisible(node, "first_sigma", !latentOnly);
     setWidgetVisible(node, "sigma_spacing", !latentOnly);

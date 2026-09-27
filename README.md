@@ -16,25 +16,60 @@
 |------|------|
 | **多段时间轴** | 节点内上传视频，支持切分、均分、智能分镜分割（PySceneDetect）、追加；分割点可选中删除；可视化时间轴预览每段范围与缩略图 |
 | **多任务模式** | `task_type`：`t2v`（文生视频）、`i2v`（图生视频）、`fl2v`（首尾帧生视频）、`r2v`（参考主体生视频 / 素材组）、`v2v`（视频转视频）、`rv2v`（参考素材改视频） |
-| **首尾帧 (fl2v)** | 独立首尾帧时间轴：多组关键帧、「添加一组」上传首帧和/或尾帧（官方支持只传尾帧）；拖缘调时长；提示词写中间运动；支持「选择运行」只跑部分组 |
+| **首尾帧 (fl2v)** | 独立首尾帧时间轴：多组关键帧、「添加一组」可只写提示词（文生）、或上传首帧和/或尾帧（官方支持只传尾帧）；开「段间引导」并勾「引用上段」时，空组用上一段末尾 N 帧做运动/音频衔接；拖缘调时长；支持「选择运行」只跑部分组 |
 | **参考素材组 (r2v)** | fl2v 式分组 UI：上方「公共参数」共享参考图/音频与公共提示词（与每组提示词拼接）；每组可再挂图片1–9 / 音频1–3 / 视频1–3；提示词用 `<Picture N>` / `<Video K>` / `<Audio J>`（或 `@` 引用）；时间轴预览与选中状态同步 |
 | **源视频编辑 (v2v / rv2v)** | Bernini 风格源视频时间轴；每段源画面自动绑定 `<Video 1>`；`rv2v` 另可挂参考图（图片1–9）与参考音频（音频1–3） |
 | **选择运行** | 开启后只采样勾选的片段/素材组；未勾选段可用缓存或源画面填充（全部导出时） |
 | **外部多组接线** | `Director Group (Image to Video)` / `(Reference to Video)` + `Groups Combine`；连入导演台 `i2v_groups` / `r2v_groups` 后外部优先覆盖 UI 素材，仍支持跑批与选择运行 |
 | **原生立体声音频** | 与画面同次采样生成；`v2v`/`rv2v` 可选生成声音 / 使用原声 / 静音 |
 | **段间引导** | 默认关闭；多段 `t2v` / `i2v` / `fl2v` / `r2v` / `v2v` / `rv2v` 时可开启，将上一段生成结果的末尾运动（及生成音频）钉入下一段采样再裁掉前缀。上下文帧数：5 / 22 / 39 / 56，**默认推荐为 22**。**感谢 [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) 提供的实现思路** |
+| **语义桥 (Semantic Bridge)** | 外接 **MiniMax H3 Director Semantic Bridge** 到导演台 `selflift` 上方的 `semantic_bridge` 口。未接线 = 完全相同。接线后用 student MLP 改写官方 cond token（RMS-norm → 残差混合）。权重自行放到 `models/semantic_bridge/`，本插件不分发；节点里换 adapter 即可在原版与 BUNNY 之间切换，不要串两座桥。原版偏构图/空间/计数等静态关系；BUNNY 偏动作归属与复杂多人。蒸馏于 FL2VA；`r2v` / `v2v` / `rv2v` 为强制兼容，请谨慎使用。参考 [speach1sdef178/MiniMax-H3-Semantic-Bridge](https://huggingface.co/speach1sdef178/MiniMax-H3-Semantic-Bridge)、[JOKER141/BUNNY_H3_Conditioning_Bridge](https://huggingface.co/JOKER141/BUNNY_H3_Conditioning_Bridge) |
+| **渐进一采 (SelfLift)** | 外接 **MiniMax H3 Director SelfLift** 到导演台 `selflift` 口（Refine 上方）。未接线 = 原来的单阶段一采。接线后一采变为低清前缀 + 3D lift + 高清收尾，画布仍是导演台分辨率。Euler。**感谢 [slmonker/selflift-Avatar](https://github.com/slmonker/selflift-Avatar) 提供的实现思路** |
 | **二采 / 放大 (Refine)** | 外接 **MiniMax H3 Director Refine** 到导演台 `refine` 口。未接线 = 原来的单次采样。`refine` = 同分辨率精修；`upscale` = 先放大到目标画布再按 SIGMAS 二采（像素插值 / RTX VSR / H3 latent）；`latent_upscale` = 只放大 H3 latent、不二采。`passes` 可多次精修（upscale 只放大一次）。可选接 `refine_model` 换二采 UNET。`images` 为二采后成片，`images_pre_refine` 为一采（放大前）画面 |
 | **运行报告** | `report` 口输出分段计划、每段任务摘要 |
+| **导演包导入导出** | 工具栏「导入/导出导演包」：zip 内保存时间轴 JSON 与参考图/视频/音频。目录名为英文（`shared_params/`、`asset_groups/01/`、`Picture1`…），与切到 EN 后的界面用语对应，避免路径编码问题 |
+
+参考音频槽可直接选择已有视频，或从本地选择音频/视频；视频会立即提取首条音轨为 FLAC，结果直接保存到 `input/`。本地视频只在临时目录中用于提取，不会作为视频素材保存。音频沿用 ComfyUI 现有上传规则：同名同内容直接复用，同名不同内容自动添加序号且不会覆盖；当前素材组也不会重复添加同一路径。
 
 ### 输入 / 输出
 
 **输入：** `model` → `video_vae` → `audio_vae` → `clip`  
-**可选：** `i2v_groups`（Image to Video 多组）/ `r2v_groups`（Reference to Video 多组）/ `refine`（`MiniMax H3 Director Refine`）
+**可选：** `i2v_groups`（Image to Video 多组）/ `r2v_groups`（Reference to Video 多组）/ `semantic_bridge`（`MiniMax H3 Director Semantic Bridge`）/ `selflift`（`MiniMax H3 Director SelfLift`）/ `refine`（`MiniMax H3 Director Refine`）
 
 **输出：** `images` → `audio` → `fps` → `frame_count` → `source_images` → `report` → `images_pre_refine`
 
 > CLIP Loader 的 **type 必须选 `minimax`**（Qwen3-VL）。  
 > `t2v` / `i2v` / `fl2v` 用 **fl2va** UNET；`r2v` / `v2v` / `rv2v` 用 **ref2va** UNET。
+
+`输出原片到 source_images` 只填充独立的 `source_images` 输出，不会改变主 `images`。请将 `source_images` 另接预览或视频合成节点查看；解码失败时运行报告会明确说明，并输出灰色占位而不会冒充生成画面。
+
+## 导演包（剧本 + 素材）
+
+工具栏右侧 **导入导演包 / 导出导演包**。导出为 `*.mmxpack.zip`。路径只用 ASCII，与英文界面一致（与当前 UI 语言无关）。
+
+| English UI | Pack path |
+|------|------|
+| Shared params | `shared_params/` |
+| Asset group 1 | `asset_groups/01/` |
+| Picture 1–9 | `Picture1.png` … `Picture9.webp` |
+| Video 1–3 | `Video1.mp4` |
+| Audio 1–3 | `Audio1.wav` |
+| start / end (fl2v) | `start.jpg` / `end.jpg` in that group folder |
+| Upload video (v2v source) | `source_video/` |
+
+```
+pack.json
+shared_params/shared_params.json
+shared_params/Picture1.png
+asset_groups/01/group.json
+asset_groups/01/Picture4.png
+timeline.json
+```
+
+- `timeline.json`：导演台导出时写入，用于无损往返（含其它任务草稿等）。
+- 转换工具可以只写 `pack.json` + `shared_params/` + `asset_groups/`，不必手写 `timeline.json`。
+- 槽位编号与界面相同：公共参数占用 Picture 1–3 时，组文件夹里从 `Picture4` 续编，不要在组内把第一张改名为 `Picture1`。
+- 不含 UNET / CLIP / VAE。导入会覆盖当前节点时间轴（有确认）。媒体落到 ComfyUI `input/minimax_director_packs/`。
 
 ## 依赖
 
@@ -134,9 +169,10 @@ Spectrum 是近似加速器。画质敏感任务请用相同 seed 和参数对�
 ### 首尾帧 fl2v 用法摘要
 
 1. 任务类型选 **「首尾帧生视频 (fl2v)」**
-2. 点击「添加一组」，上传首帧和/或尾帧（可只传尾帧）
-3. 在镜卡片或时间轴上调整时长；提示词写中间运动 / 镜头 / 过渡
-4. Queue 生成；多组可勾选「选择运行」只跑部分组
+2. 点击「添加一组」：可只写提示词（文生）；或上传首帧和/或尾帧（可只传尾帧；仅首帧=图生）
+3. 多组时打开「段间引导」并勾「引用上段」，空组会用上一段末尾 N 帧（上下文帧数，默认 22）引导衔接
+4. 在镜卡片或时间轴上调整时长；提示词写中间运动 / 镜头 / 过渡
+5. Queue 生成；多组可勾选「选择运行」只跑部分组
 
 ### 参考主体 r2v 用法摘要
 
@@ -160,10 +196,12 @@ Spectrum 是近似加速器。画质敏感任务请用相同 seed 和参数对�
 4. 可选接 `refine_model`（二采 UNET）；不接则用导演台主模型。适合一采挂 Turbo LoRA、二采卸掉或换另一套
 5. 导演台 `images` 是二采后成片；`images_pre_refine` 是一采、放大前的画面，便于对比。`source_images` 仍是时间轴原片，不是一采结果
 6. 未接 `sigmas` 时使用内置 `second_pass_steps=2`、`first_sigma=0.8`、`linear`；接入 `BasicScheduler`、`ManualSigmas` 或自定义 SIGMAS 时以接线为准
-7. `seed_mode=fixed` 可给二采独立 seed。`skip_fl2v` 只跳过 fl2v 二采，仍将镜头放大到统一终稿分辨率
-8. `upscale` 默认 `h3_latent`：选择 3D 权重、device 和 precision；外部 upscaler 会做长视频 temporal chunking。权重放 `ComfyUI/models/latent_upscale_models/`
+7. `seed_mode=fixed` 使用 `second_seed`；`independent` 使用可单独控制的 `seed`，不改变一采种子。`skip_fl2v` 只跳过 fl2v 二采，仍将镜头放大到统一终稿分辨率
+8. `upscale` 默认 `h3_latent`：选择 3D 权重、device 和 precision；`enable_latent_chunking` 控制外部 upscaler 的长视频时间分块。权重放 `ComfyUI/models/latent_upscale_models/`
 9. `strict` 默认开启：放大、二采或终稿尺寸不正确时停止工作流，不静默退回低分辨率一采结果
 10. Advanced 可启用 `CFGNorm`，`0.95` 对齐 `multiple_steps_test`；「分段导出」且 `passes>1` 时，每轮会另落 `seg_XXXX_pN.mp4`
+11. `confirm_first_pass` 开启后，首次 Queue 缓存一采；保持一采种子和参数再 Queue，命中缓存时只执行二采
+12. `enable_tiling` 可在二采时按 `tile_count` 和 `tile_overlap` 做空间分块；与旧的 `tiled_refine_enabled` 分块选项二选一
 
 示例：`example_workflows/minimax_h3_director_二采_加速.json`
 
@@ -210,7 +248,10 @@ Spectrum 是近似加速器。画质敏感任务请用相同 seed 和参数对�
 - [MiniMax-AI](https://github.com/MiniMax-AI) — MiniMax H3 模型
 - [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) — 权重与文档
 - [NikoDemon80/ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) — 段间运动/音频续拍思路参考
-- [LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler) — Refine `h3_latent` 外部执行后端
+- [LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler) — H3 3D latent 放大架构与权重格式参考
+- [slmonker/selflift-Avatar](https://github.com/slmonker/selflift-Avatar) — SelfLift 渐进一采思路参考
+- [speach1sdef178/MiniMax-H3-Semantic-Bridge](https://huggingface.co/speach1sdef178/MiniMax-H3-Semantic-Bridge) — Semantic Bridge student 公式与适配器格式参考
+- [JOKER141/BUNNY_H3_Conditioning_Bridge](https://huggingface.co/JOKER141/BUNNY_H3_Conditioning_Bridge) — 同架构的动作逻辑 / 多人场景适配器参考
 
 ## 许可证
 

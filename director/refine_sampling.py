@@ -10,6 +10,8 @@ import torch
 from ..lib.image_prep import ensure_minimax_canvas
 from .core_sampling import sample_single_stage
 from .refine_pack import (
+    DEFAULT_SPATIAL_TILES,
+    DEFAULT_TILE_OVERLAP,
     latent_upscale_model_name,
     refine_model_for,
     refine_needs_canvas,
@@ -373,7 +375,7 @@ def _apply_h3_latent_upscale(
         model_name=model_name,
         mode={"mode": "target dimensions", "width": int(tw), "height": int(th)},
         align=32,
-        enable_temporal_chunking=True,
+        enable_temporal_chunking=bool(pack.get("enable_latent_chunking", True)),
         force_unload=True,
         device=device,
         precision=precision,
@@ -706,6 +708,9 @@ def apply_segment_refine(
                     phase_name="refine",
                     sigmas=sigma_list,
                     apply_shift=True,
+                    enable_tiling=bool(pack.get("enable_tiling", False)),
+                    tile_count=int(pack.get("tile_count") or DEFAULT_SPATIAL_TILES),
+                    tile_overlap=int(pack.get("tile_overlap") if pack.get("tile_overlap") is not None else DEFAULT_TILE_OVERLAP),
                 )
             last_ok = work
             if on_pass is not None:

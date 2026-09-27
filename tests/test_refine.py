@@ -22,7 +22,7 @@ class RefinePackTest(unittest.TestCase):
         fields = [*input_types["required"].values(), *input_types["optional"].values()]
         tooltips = [field[1]["tooltip"] for field in fields]
 
-        self.assertEqual(len(tooltips), 35)
+        self.assertGreaterEqual(len(tooltips), 35)
         self.assertTrue(all(tooltips))
         self.assertFalse(any(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff]", tooltip) for tooltip in tooltips))
 

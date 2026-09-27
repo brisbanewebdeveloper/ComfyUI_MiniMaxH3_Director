@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import base64
-import io
-
 import torch
-from PIL import Image
 
 from ..lib.audio_io import extract_timeline_audio
 from ..lib.image_prep import fit_canvas, fit_video_long_edge
@@ -29,8 +25,9 @@ def resolve_segment_raw_clip(plan: DirectorPlan, seg) -> torch.Tensor:
     if seg.source_clip is not None and seg.source_clip.shape[0] > 0:
         return seg.source_clip.clone()
 
-    # Pure t2v (incl. external groups) has no source frames.
-    if getattr(seg, "task_key", "") == "t2v":
+    # t2v/r2v (incl. external groups) have no source frames. Do not slice the
+    # placeholder gen source_video (len=segment_count 16×16 gray frames).
+    if getattr(seg, "task_key", "") in {"t2v", "r2v"}:
         return torch.zeros((0, 16, 16, 3), dtype=torch.float32)
 
     # Continuity i2v and fl2v end-only leave source_clip=None on purpose. Do not
@@ -70,6 +67,9 @@ def resolve_segment_raw_clip_with_lookahead(
         # Gen canvases have no timeline lookahead beyond the clip itself.
         return seg.source_clip.clone()
 
+    if getattr(seg, "task_key", "") in {"t2v", "r2v"}:
+        return torch.zeros((0, 16, 16, 3), dtype=torch.float32)
+
     if getattr(seg, "task_key", "") == "fl2v" and is_gen_timeline_plan(plan):
         return torch.zeros((0, 16, 16, 3), dtype=torch.float32)
 
@@ -105,8 +105,8 @@ def source_passthrough_chunk(plan: DirectorPlan, seg) -> torch.Tensor:
 def segment_passthrough_chunk(plan: DirectorPlan, seg) -> torch.Tensor | None:
     """Best-effort fill for skipped segments from **real source video** only.
 
-    Gen timelines (t2v/r2v/i2v/fl2v batch) use gray canvases or held refs as
-    ``source_clip`` — never splice those into「全部导出」or the merge goes gray.
+    Gen timelines (t2v/r2v have no source; i2v/fl2v use held refs as
+    ``source_clip``) — never splice those into「全部导出」or the merge goes gray.
     Unselected gen segments must come from disk cache instead.
     """
     if is_gen_timeline_plan(plan):
@@ -144,3 +144,5 @@ def tensor_frame_to_jpeg_b64(frame: torch.Tensor) -> str:
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=88)
     return base64.b64encode(buf.getvalue()).decode("ascii")
+def frames_label(seg) -> str:
+    return f"帧 {seg.start_frame}–{seg.end_frame} ({seg.frame_count}f)"
