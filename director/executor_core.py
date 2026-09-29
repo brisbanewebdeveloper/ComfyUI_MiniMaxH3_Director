@@ -65,6 +65,7 @@ from .h3_motion_context import (
     DEFAULT_AUDIO_CONTEXT_FRAMES,
     apply_motion_context,
     continuity_export_len,
+    describe_pin_window,
     generation_frame_budget,
     handoff_end_frame,
     select_continuity_pin_latent,
@@ -224,8 +225,13 @@ def _build_minimax_inputs(
         # promote clip_frames[0] into first_frame.
         if first_frame is not None and last_frame is None and clip_frames is not None:
             # Start+end endpoint hold: last may only live on the clip tail.
+            # Start-only shots hold image0 through the whole clip — a tail equal to
+            # the head is not an end keyframe; locking it makes the shot return to
+            # its first frame (and the next segment's pin inherits that).
             if clip_frames.shape[0] >= 2:
-                last_frame = clip_frames[-1:].clone()
+                tail = clip_frames[-1:]
+                if not torch.equal(tail, clip_frames[:1]):
+                    last_frame = tail.clone()
     elif task_key == "i2v":
         # Explicit per-segment image wins; motion-context path leaves first_frame empty
         # so the previous tail can be pinned as a multi-frame head instead.
@@ -785,7 +791,7 @@ def execute_director_plan_core(
             reference_semantics_for_segment(plan, seg),
         )
 
-        if seg.task_key == "fl2v":
+        if seg.task_key in {"fl2v", "i2v"}:
             from .fl2v_timeline import reinforce_fl2v_prompt
 
             has_start = any(getattr(r, "index", None) == 0 for r in (seg.refs or []))
@@ -794,6 +800,7 @@ def execute_director_plan_core(
                 # Legacy packs without explicit indices: [start] or [start, end].
                 has_start = True
                 has_end = len(seg.refs) >= 2
+            # Strip leftover Director hard-lock wraps; official path does not re-inject.
             positive_prompt = reinforce_fl2v_prompt(
                 positive_prompt,
                 has_end_frame=has_end,
@@ -1111,6 +1118,9 @@ def execute_director_plan_core(
                     )
             handoff_label = "guide+redraw" if is_continue_mode(plan) else "guide"
             task_hint = f"{task_hint} + {handoff_label} {trim_frames}f"
+            pin_note = describe_pin_window(prev_av, trim_frames, end_frame=prev_end_frame)
+            if pin_note:
+                reports.append(f"Seg #{seg.index + 1}: {pin_note}")
             remask_note = (
                 f"(redraw {float(getattr(plan, 'continuity_redraw', 0.10)):.2f}, no cond-pin) "
                 if is_continue_mode(plan)
@@ -1676,9 +1686,12 @@ def execute_director_plan_core(
             completed_refine_passes,
         )
         if export_segments_mode:
-            # Older than the predecessor cannot be pinned anymore.
+            # Older than the predecessor cannot be pinned anymore. The last run
+            # segment is the clip the IMAGE outputs carry: this loop also walks
+            # unselected slots after it (「选择运行」), which must not poster it.
+            last_run_idx = max(run_indices) if run_indices else -1
             for stale in tuple(completed_outputs):
-                if int(stale) < int(seg.index) - 1:
+                if int(stale) < int(seg.index) - 1 and int(stale) != last_run_idx:
                     _release_segment_pixels(
                         stale,
                         completed_outputs=completed_outputs,
