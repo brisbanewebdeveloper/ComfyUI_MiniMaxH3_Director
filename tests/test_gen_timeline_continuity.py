@@ -115,6 +115,35 @@ class GenTimelineContinuityTest(unittest.TestCase):
         self.assertEqual(plan.segments[0].loras, [])
         self.assertEqual(plan.segments[1].loras, timeline["segments"][1]["loras"])
 
+    def test_mixed_groups_keep_tasks_and_independent_shared_prompts(self):
+        image = {"imageB64": image_b64(), "width": 32, "height": 32}
+        timeline = {
+            "timelineMode": "prompt_batch",
+            "editMode": "segment",
+            "frameRate": 24,
+            "global": {
+                "taskType": "mixed",
+                "prompt": "reference style",
+                "commonEnabled": True,
+                "t2vCommon": {"enabled": True, "prompt": "text style"},
+            },
+            "output": {"mode": "fixed", "width": 32, "height": 32},
+            "segments": [
+                {"taskType": "t2v", "frameCount": 4, "prompt": "sky"},
+                {"taskType": "i2v", "frameCount": 4, "prompt": "river", "genImage": image},
+                {"taskType": "fl2v", "frameCount": 4, "prompt": "bridge", "startImage": image},
+                {"taskType": "r2v", "frameCount": 4, "prompt": "person"},
+            ],
+        }
+
+        plan = build_plan(timeline)
+
+        self.assertEqual([s.task_key for s in plan.segments], ["t2v", "i2v", "fl2v", "r2v"])
+        self.assertEqual([s.prompt for s in plan.segments],
+                         ["text style\n\nsky", "river", "bridge", "reference style\n\nperson"])
+        self.assertIsNotNone(plan.segments[1].source_clip)
+        self.assertEqual(len(plan.segments[2].refs), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

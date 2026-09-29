@@ -17,12 +17,13 @@ from ..lib.task_prompts import resolve_task_key
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.gen")
 
-GEN_BLANK_KEYS = frozenset({"t2v", "r2v"})
+GEN_BLANK_KEYS = frozenset({"t2v", "r2v", "mixed"})
 GEN_IMAGE_KEYS = frozenset({"i2v"})
 FL2V_KEYS = frozenset({"fl2v"})
 GEN_TASK_KEYS = GEN_BLANK_KEYS | GEN_IMAGE_KEYS | FL2V_KEYS
-PROMPT_BATCH_KEYS = frozenset({"t2v", "i2v", "r2v", "fl2v"})
-VIDEO_BATCH_KEYS = frozenset({"t2v", "i2v", "r2v", "fl2v"})
+PROMPT_BATCH_KEYS = frozenset({"t2v", "i2v", "r2v", "fl2v", "mixed"})
+VIDEO_BATCH_KEYS = PROMPT_BATCH_KEYS
+MIXED_SEGMENT_KEYS = frozenset({"t2v", "i2v", "fl2v", "r2v"})
 IMAGE_BATCH_KEYS = frozenset()
 
 MIN_GEN_FRAMES = 1
@@ -77,8 +78,17 @@ def _min_frames_for_task(task_key: str) -> int:
     return MIN_GEN_VIDEO_FRAMES
 
 
-def _segment_frame_count(raw: dict, *, default: int, task_key: str) -> int:
-    fc = int(raw.get("frameCount") or raw.get("frame_count") or raw.get("length") or default)
+def _segment_frame_count(raw: dict, *, default: int, task_key: str, frame_rate: float) -> int:
+    duration = raw.get("durationSec") or raw.get("duration_sec")
+    if is_video_batch_task_key(task_key) and duration is not None:
+        try:
+            from .fl2v_timeline import _duration_to_minimax_frames
+
+            fc = _duration_to_minimax_frames(float(duration), frame_rate)
+        except (TypeError, ValueError):
+            fc = int(raw.get("frameCount") or raw.get("frame_count") or raw.get("length") or default)
+    else:
+        fc = int(raw.get("frameCount") or raw.get("frame_count") or raw.get("length") or default)
     return max(_min_frames_for_task(task_key), fc)
 
 
@@ -87,11 +97,12 @@ def _gen_segment_ranges(
     *,
     default_frame_count: int,
     task_key: str,
+    frame_rate: float,
 ) -> list[tuple[int, int, dict]]:
     ranges: list[tuple[int, int, dict]] = []
     start = 0
     for raw in segments:
-        fc = _segment_frame_count(raw, default=default_frame_count, task_key=task_key)
+        fc = _segment_frame_count(raw, default=default_frame_count, task_key=task_key, frame_rate=frame_rate)
         ranges.append((start, start + fc, raw))
         start += fc
     if not ranges:
@@ -128,6 +139,57 @@ def _load_gen_image_tensor(ref: dict) -> torch.Tensor:
     if tensor is None:
         raise ValueError("Generation segment image could not be loaded.")
     return tensor
+
+
+def _resolve_segment_task(seg_data: dict, task_type: str, task_key: str) -> str:
+    """Resolve a mixed segment to a concrete generation task."""
+    raw = seg_data.get("taskType") or seg_data.get("task_type") or ""
+    if task_key == "mixed":
+        return raw if resolve_task_key(raw) in MIXED_SEGMENT_KEYS else "t2v"
+    return raw or task_type
+
+
+def _fl2v_image_raw(seg_data: dict, slot: int) -> dict | None:
+    key = "startImage" if slot == 0 else "endImage"
+    raw = seg_data.get(key) or seg_data.get("start_image" if slot == 0 else "end_image")
+    if isinstance(raw, dict) and (raw.get("imageFile") or raw.get("imageB64") or raw.get("image_file")):
+        return raw
+    if slot == 0:
+        raw = _resolve_gen_image_ref(seg_data, edit_mode="segment", global_block={})
+        if raw:
+            return raw
+    for item in seg_data.get("refs") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("index", item.get("slot", -1)))
+        except (TypeError, ValueError):
+            continue
+        if index == slot and (item.get("imageFile") or item.get("imageB64") or item.get("image_file")):
+            return item
+    return None
+
+
+def _load_fl2v_segment_refs(seg_data: dict, *, width: int, height: int, output_mode: str, ref_max_size: int):
+    from .fl2v_timeline import _fit_image, _unify_fl2v_pair_canvas
+    from .plan import SegmentRef
+
+    images = []
+    for slot in (0, 1):
+        raw = _fl2v_image_raw(seg_data, slot)
+        image = (
+            _fit_image(
+                _load_gen_image_tensor(raw), width=width, height=height,
+                output_mode=output_mode, ref_max_size=ref_max_size,
+            )
+            if raw else None
+        )
+        images.append(image)
+    start, end = _unify_fl2v_pair_canvas(*images)
+    return [
+        SegmentRef(index=slot, tensor=img[:1].clone())
+        for slot, img in enumerate((start, end)) if img is not None
+    ]
 
 
 def _build_i2v_source_clip(
@@ -279,15 +341,37 @@ def build_gen_director_plan(
         if global_block.get("commonEnabled") is not None
         else global_block.get("common_enabled")
     )
+    # Mixed: t2v common prompt is independent of r2v (global prompt + refs).
+    # Graphs saved before the split have no t2vCommon; keep the old shared prompt.
+    t2v_common_block = global_block.get("t2vCommon") or global_block.get("t2v_common") or {}
+    if not isinstance(t2v_common_block, dict):
+        t2v_common_block = {}
+    if task_key == "mixed" and (
+        "enabled" in t2v_common_block
+        or "commonEnabled" in t2v_common_block
+        or "prompt" in t2v_common_block
+    ):
+        t2v_flag = t2v_common_block.get("enabled")
+        if t2v_flag is None:
+            t2v_flag = t2v_common_block.get(
+                "commonEnabled", t2v_common_block.get("common_enabled")
+            )
+        mixed_t2v_enabled = bool(t2v_flag)
+        mixed_t2v_prompt = t2v_common_block.get("prompt") or ""
+    else:
+        mixed_t2v_enabled = common_enabled
+        mixed_t2v_prompt = prompt
 
     output_block = timeline.get("output") or {}
     gen_block = timeline.get("gen") or {}
     default_fc = int(gen_block.get("defaultFrameCount") or total_frames or 81)
+    fps = float(timeline.get("frameRate") or frame_rate or 24)
 
     segment_ranges = _gen_segment_ranges(
         timeline.get("segments") or [],
         default_frame_count=default_fc,
         task_key=task_key,
+        frame_rate=fps,
     )
 
     from .segment_continuity import (
@@ -371,17 +455,35 @@ def build_gen_director_plan(
     for idx, (start, end, seg_data) in enumerate(segment_ranges):
         if edit_mode == "global":
             seg_prompt = prompt
-            seg_task = task_type
+            seg_task = _resolve_segment_task(seg_data, task_type, task_key)
             seg_refs = list(global_refs)
             use_global = True
             seg_negative = ""
         else:
             use_global = False
-            seg_task = seg_data.get("taskType") or seg_data.get("task_type") or task_type
+            seg_task = _resolve_segment_task(seg_data, task_type, task_key)
             seg_task_key_preview = resolve_task_key(seg_task)
             local_prompt = (seg_data.get("prompt") or "").strip()
-            # r2v/r2i + commonEnabled: shared prompt prefixes each group prompt.
-            if seg_task_key_preview in ("r2v", "r2i") and common_enabled:
+            # t2v mode: one shared prompt. Mixed: t2v and r2v each have their own.
+            # Mixed i2v / fl2v ignore both. t2v never merges reference media.
+            if task_key == "mixed":
+                if seg_task_key_preview == "t2v":
+                    seg_prompt = (
+                        concat_common_segment_prompt(mixed_t2v_prompt, local_prompt)
+                        if mixed_t2v_enabled
+                        else local_prompt
+                    )
+                elif seg_task_key_preview in ("r2v", "r2i") and common_enabled:
+                    seg_prompt = concat_common_segment_prompt(prompt, local_prompt)
+                else:
+                    seg_prompt = local_prompt
+            elif seg_task_key_preview == "t2v" and task_key == "t2v":
+                seg_prompt = (
+                    concat_common_segment_prompt(prompt, local_prompt)
+                    if common_enabled
+                    else local_prompt
+                )
+            elif seg_task_key_preview in ("r2v", "r2i") and common_enabled:
                 seg_prompt = concat_common_segment_prompt(prompt, local_prompt)
             else:
                 seg_prompt = local_prompt or prompt
@@ -403,6 +505,11 @@ def build_gen_director_plan(
                 len(seg_refs),
             )
         seg_refs = segment_refs_for_context(seg_task_key, seg_refs)
+        if seg_task_key == "fl2v":
+            seg_refs = _load_fl2v_segment_refs(
+                seg_data, width=out_w, height=out_h,
+                output_mode=out_mode, ref_max_size=ref_max,
+            )
         seg_ref_audios = []
         seg_ref_videos = []
         if edit_mode == "global":
@@ -466,7 +573,21 @@ def build_gen_director_plan(
                 seg_task_key,
             )
         source_clip = source_clips[idx] if idx < len(source_clips) else None
-        seg_source = source_clip.clone() if source_clip is not None else None
+        if task_key == "mixed" and seg_task_key == "i2v":
+            img_ref = _resolve_gen_image_ref(seg_data, edit_mode="segment", global_block=global_block)
+            if img_ref:
+                seg_source = _build_i2v_source_clip(
+                    _load_gen_image_tensor(img_ref), max(1, end - start),
+                    width=out_w, height=out_h, output_mode=out_mode, ref_max_size=ref_max,
+                )
+            else:
+                seg_source = None
+        else:
+            seg_source = (
+                source_clip.clone()
+                if source_clip is not None and seg_task_key not in GEN_BLANK_KEYS
+                else None
+            )
 
         segments.append(
             SegmentPlan(
