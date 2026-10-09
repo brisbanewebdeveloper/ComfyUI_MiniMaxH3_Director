@@ -62,7 +62,7 @@ def _parse_loras(raw: str | list[Any]) -> list[dict[str, Any]]:
     for index, item in enumerate(data, start=1):
         if not isinstance(item, dict):
             raise ValueError(f"LoRA entry {index} must be an object.")
-        if not item.get("enabled", True):
+        if not item.get("active", item.get("enabled", True)):
             continue
         name = item.get("name")
         if not isinstance(name, str) or not name.strip():

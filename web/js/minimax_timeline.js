@@ -110,6 +110,13 @@ import {
     REFERENCE_SEMANTICS_STYLES,
 } from "./minimax_reference_semantics.js";
 import {
+    bindSegmentLoraEvents,
+    bindSegmentLoraRefs,
+    normalizeLoraRows,
+    renderSegmentLoras,
+    segmentLoraTemplate,
+} from "./minimax_segment_loras.js";
+import {
     applyI18nDom,
     aspectDisplayLabel,
     getLocale,
@@ -370,6 +377,7 @@ function sanitizeSegmentForPayload(seg) {
                 subfolder: rest.referenceVideo.subfolder || "",
             }
             : undefined,
+        loras: normalizeLoraRows(rest.loras),
     };
 }
 
@@ -2713,6 +2721,7 @@ class MiniMaxH3DirectorEditor {
                     // External graph is source of truth for media previews.
                     startImage: imageRefFromPath(spec.firstImageFile),
                     endImage: imageRefFromPath(spec.lastImageFile),
+                    loras: matched?.loras,
                 });
             });
             syncFl2vFromShots(this);
@@ -2813,6 +2822,7 @@ class MiniMaxH3DirectorEditor {
                         ? resolveSegmentRefImageSize({ refImageSize: spec.refImageSize })
                         : resolveSegmentRefImageSize(matched, this.timeline?.output),
                     ...(matched?.runEnabled != null ? { runEnabled: matched.runEnabled } : {}),
+                    loras: matched?.loras,
                 });
             });
             for (const item of promptWriteBack) {
@@ -3042,6 +3052,7 @@ class MiniMaxH3DirectorEditor {
                         // Persist per-segment「引用上段」(default true when unset).
                         continuityFromPrev: isSegmentContinuityFromPrev(clean, i),
                         refImageSize: resolveSegmentRefImageSize(clean, this.timeline.output),
+                        loras: normalizeLoraRows(clean.loras),
                     };
                 }),
                 ...this._runSelectionPayload(),
@@ -3556,6 +3567,7 @@ class MiniMaxH3DirectorEditor {
                     <span class="bd-label" data-i18n="panel.segmentFrames">片段帧数</span>
                     <input type="number" class="bd-num" data-r="gen-seg-fc" min="1" max="${MAX_GEN_FRAMES}" value="124" style="width:72px">
                 </div>
+                ${segmentLoraTemplate()}
             </div>`;
         this.mainBody.appendChild(bottom);
 
@@ -3760,6 +3772,8 @@ class MiniMaxH3DirectorEditor {
     }
 
     bindEvents() {
+        bindSegmentLoraRefs(this);
+        bindSegmentLoraEvents(this);
         const bind = (sel, fn) => {
             const el = this.root.querySelector(sel);
             if (!el) return;
@@ -11605,6 +11619,7 @@ class MiniMaxH3DirectorEditor {
             const fc = liveSeg.frameCount ?? liveSeg.length ?? defaultFrameCount(this.getTaskKey(), this.getFrameRate());
             if (this.genSegFc) this.genSegFc.value = fc;
         }
+        renderSegmentLoras(this, liveSeg);
         if (this.isFl2vMode()) updateFl2vDetailUI(this);
     }
 

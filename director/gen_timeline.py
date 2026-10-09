@@ -604,8 +604,8 @@ def build_gen_director_plan(
                 negative_prompt=seg_negative,
                 source_clip=seg_source,
                 continuity_from_prev=continuity_flags[idx],
-                loras=list(seg_data.get("loras") or []),
                 ref_image_size=resolve_ref_image_size(seg_data, timeline),
+                loras=list((global_block if use_global else seg_data).get("loras") or []),
             )
         )
 
