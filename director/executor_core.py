@@ -1596,10 +1596,6 @@ def execute_director_plan_core(
             completed_audios[seg.index] = audio_dict
         write_cache = _segment_disk_cache_needed(
             plan,
-            chunk,
-            av_latent=cpu_samples,
-            handoff=handoff,
-            audio=audio_dict if isinstance(audio_dict, dict) else None,
             timeline_seg_total=timeline_seg_total,
             will_refine=will_refine,
             hold_after_first=hold_after_first,
@@ -1611,7 +1607,7 @@ def execute_director_plan_core(
                 seg,
                 plan,
                 chunk,
-                av_latent=samples,
+                av_latent=cpu_samples,
                 handoff=handoff,
                 audio=audio_dict if isinstance(audio_dict, dict) else None,
             )
