@@ -84,6 +84,7 @@ from .segment_cache import (
     load_segment_cache,
     load_segment_handoff_meta,
     prune_segment_cache,
+    resolve_segment_cache_key,
     save_first_pass_cache,
     save_segment_cache,
     av_latent_to_cpu,
@@ -415,6 +416,7 @@ def execute_director_plan_core(
     plan: DirectorPlan,
     *,
     node_id: str | None = None,
+    cache_name: str | None = None,
     model,
     vae,
     audio_vae,
@@ -445,6 +447,10 @@ def execute_director_plan_core(
     list[torch.Tensor],
 ]:
     """Process every segment with MiniMax H3 conditioning + single-stage sampling."""
+    # 缓存目录 key：填了「缓存文件夹名」用 <名字>_<节点id>，留空则只有节点 id（老工作流行为不变）。
+    # 进度上报必须继续用真实节点 id —— 前端是按画布节点 id 认进度条的。
+    progress_node_id = node_id
+    node_id = resolve_segment_cache_key(cache_name, node_id)
     plan.sample_seed = int(seed)
     plan.sample_cfg = float(cfg)
     plan.sample_steps = int(steps)
@@ -651,7 +657,7 @@ def execute_director_plan_core(
         }
 
         report_director_progress(
-            node_id, segment_index=progress_index, segment_total=seg_total,
+            progress_node_id, segment_index=progress_index, segment_total=seg_total,
             phase="prepare", phase_value=0, phase_max=1, **meta,
         )
 
@@ -791,7 +797,7 @@ def execute_director_plan_core(
         assert_minimax_canvas(ctx_w, ctx_h)
 
         report_director_progress(
-            node_id, segment_index=progress_index, segment_total=seg_total,
+            progress_node_id, segment_index=progress_index, segment_total=seg_total,
             phase="prepare", phase_value=1, phase_max=1, **meta,
         )
 
@@ -841,7 +847,7 @@ def execute_director_plan_core(
             )
 
         report_director_progress(
-            node_id, segment_index=progress_index, segment_total=seg_total,
+            progress_node_id, segment_index=progress_index, segment_total=seg_total,
             phase="context_encode", phase_value=0, phase_max=1, **meta,
         )
 
@@ -1156,7 +1162,7 @@ def execute_director_plan_core(
             )
 
         report_director_progress(
-            node_id, segment_index=progress_index, segment_total=seg_total,
+            progress_node_id, segment_index=progress_index, segment_total=seg_total,
             phase="context_encode", phase_value=1, phase_max=1, **meta,
         )
 
@@ -1172,7 +1178,7 @@ def execute_director_plan_core(
 
         def _report_sample_phase(phase: str, value: float) -> None:
             report_director_progress(
-                node_id, segment_index=progress_index, segment_total=seg_total,
+                progress_node_id, segment_index=progress_index, segment_total=seg_total,
                 phase=phase, phase_value=value, phase_max=1, **meta,
             )
 
@@ -1186,7 +1192,7 @@ def execute_director_plan_core(
                     return
                 encoded = [pil_to_jpeg_b64(pil, quality=72) for pil in frames]
                 report_director_segment_preview(
-                    node_id,
+                    progress_node_id,
                     segment_index=ui_idx,
                     image_b64=encoded[0],
                     width=frames[0].width,
@@ -1286,7 +1292,7 @@ def execute_director_plan_core(
             else:
                 try:
                     report_director_progress(
-                        node_id, segment_index=progress_index, segment_total=seg_total,
+                        progress_node_id, segment_index=progress_index, segment_total=seg_total,
                         phase="decode", phase_value=0, phase_max=1, **meta,
                     )
                     first_pass_gpu, _ = _decode_av_latent(
@@ -1349,7 +1355,7 @@ def execute_director_plan_core(
             suffix = f"p{int(pass_i)}"
             try:
                 report_director_progress(
-                    node_id, segment_index=progress_index, segment_total=seg_total,
+                    progress_node_id, segment_index=progress_index, segment_total=seg_total,
                     phase="decode", phase_value=0, phase_max=1, **meta,
                 )
                 decoded_p, audio_p = _decode_av_latent(
@@ -1424,7 +1430,7 @@ def execute_director_plan_core(
         sample_s = time.perf_counter() - t_sample
 
         report_director_progress(
-            node_id, segment_index=progress_index, segment_total=seg_total,
+            progress_node_id, segment_index=progress_index, segment_total=seg_total,
             phase="decode", phase_value=0, phase_max=1, **meta,
         )
         t_decode = time.perf_counter()
@@ -1461,7 +1467,7 @@ def execute_director_plan_core(
                     f"Refine requested {expected_w}×{expected_h}."
                 )
         report_director_progress(
-            node_id, segment_index=progress_index, segment_total=seg_total,
+            progress_node_id, segment_index=progress_index, segment_total=seg_total,
             phase="decode", phase_value=1, phase_max=1, **meta,
         )
 
@@ -1847,7 +1853,7 @@ def execute_director_plan_core(
     if not output_chunks and not segment_outputs:
         raise ValueError("Director plan produced no segments.")
 
-    report_director_finish(node_id, seg_total)
+    report_director_finish(progress_node_id, seg_total)
     export_chunks = output_chunks if output_chunks else segment_outputs
     export_pre_chunks = output_pre_chunks if output_pre_chunks else segment_pre_refine
     export_pre_face_chunks = (

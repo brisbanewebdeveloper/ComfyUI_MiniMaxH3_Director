@@ -286,17 +286,22 @@ class MiniMaxH3Director:
                 needed.append("model")
         return needed
 
-    RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT", "INT", "IMAGE", "STRING", "IMAGE")
-    RETURN_NAMES = ("images", "audio", "fps", "frame_count", "source_images", "report", "images_pre_refine")
-    OUTPUT_IS_LIST = (True, True, False, False, True, False, True)
-    def IS_CHANGED(cls, unique_id=None, **kwargs):
+    @classmethod
+    def IS_CHANGED(cls, unique_id=None, cache_name=None, **kwargs):
         # Do not return NaN: that would re-run every Director queue even when
         # confirm_first_pass is off. Linked Refine is None here, so fingerprint
         # the .pre cache files that only the confirmation hold writes.
         del kwargs
-        from ..director.segment_cache import first_pass_cache_disk_signature
+        from ..director.segment_cache import (
+            first_pass_cache_disk_signature,
+            resolve_segment_cache_key,
+        )
 
-        return first_pass_cache_disk_signature(unique_id)
+        # Must resolve the same directory the executor will read/write, otherwise
+        # the confirm-first-pass hold never sees its own written .pre cache.
+        return first_pass_cache_disk_signature(
+            resolve_segment_cache_key(cache_name, unique_id)
+        )
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT", "INT", "IMAGE", "STRING", "IMAGE", "IMAGE")
     RETURN_NAMES = (
@@ -364,6 +369,7 @@ class MiniMaxH3Director:
         cache_frames_codec="raw",
         export_source_images=False,
         export_pre_face_refine=False,
+        cache_name="",
         **kwargs,
     ):
         segment_model_provider = kwargs.pop("_segment_model_provider", None)
@@ -400,6 +406,7 @@ class MiniMaxH3Director:
                 execute_director_plan_core(
                     plan,
                     node_id=unique_id,
+                    cache_name=cache_name,
                     model=model if model is not None else model_ref2va,
                     vae=video_vae,
                     audio_vae=audio_vae,
